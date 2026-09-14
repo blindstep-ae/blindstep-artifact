@@ -1,0 +1,130 @@
+"""
+BlindStep Baseline: All-Boolean Pipeline + Batcher Sort
+========================================================
+Compile : ./compile.py -R 64 baseline_ab_batcher_sort
+Run     : ./Scripts/semi2k.sh baseline_ab_batcher_sort
+
+IMPORTANT: Use -R 64 / semi2k.sh (NOT -B 64 / yao.sh). Module 1 uses sint
+arithmetic operations (load_external_cpsi_shares, aggregation_layer) which
+require the semi2k protocol. Only Module 2 operates in the Boolean domain.
+This matches the behavior of blindstep_full_ab_queue.mpc and how
+scripts/run_main_table_n5.sh actually compiles this program.
+
+Pipeline:
+  Timer M1 — MPC Ingress + Aggregation              (sint arithmetic)
+  Timer M2 — Score Composition + Domain Conversion  (sint -> sbitint edaBit)
+  Timer M3 — Module 2: Boolean Batcher Sort         (sbitint Batcher network)
+
+Note on MP-SPDZ sort() behavior:
+  The sorted array holds sbitint values, so the compare-and-swap network runs
+  in the Boolean domain. batcher=True is passed explicitly to pin
+  loopy_odd_even_merge_sort (a pure compare-and-swap network with no
+  reveal-based shortcuts) rather than relying on the default, which under -R
+  would select radix_sort — that internally reveals a shuffled key order and
+  does NOT satisfy this paper's leakage profile.
+"""
+from Compiler.types import sint, Array, MemValue
+from Compiler.library import for_range, print_ln, start_timer, stop_timer
+from Compiler.GC.types import sbitint
+import bs_core
+import module1_backend
+
+# =============== Parameters ===============
+N_F = 256
+N_E = 256
+K = 5
+SCORE_BITS = 16
+M_MAX = 3         # CPSI slot budget per A-row; edit here to sweep (must match share file)
+
+# --- Bit-width derivation ---
+TIE_BITS, PACKED_BITS, SCORE_SHIFT, VALID_SHIFT, MAX_TIE = bs_core.get_tuple_shifts(N_F, SCORE_BITS)
+
+# 64-bit sbitint: must accommodate the full packed value range
+# PACKED_BITS = 1 + SCORE_BITS + TIE_BITS = 1 + 16 + 8 = 25 for N_F=256
+# Using 64-bit width to match the sint ring and avoid valid-bit truncation.
+packed_t = sbitint.get_type(64)
+
+# =============== Module 2: Batcher Sort in Boolean Domain ===============
+
+def secure_batcher_sort_topk_boolean(candidates, N, K):
+    """
+    All-Boolean Batcher sort using sbitint.
+    Complexity: O(N log^2 N) compare-and-swap operations, all in Boolean domain.
+
+    In binary mode (-B), Array.sort() automatically invokes Batcher's network.
+    We additionally pass batcher=True for explicitness.
+
+    After ascending sort, top-K = last K elements (largest packed value first).
+    Packed tuple encoding (valid || score || ~tie) ensures correct ordering.
+    """
+    table = Array(N, packed_t)
+    @for_range(N)
+    def _(i):
+        table[i] = candidates[i]
+
+    # Batcher's odd-even merge sort — pure compare-and-swap network, no reveal
+    table.sort(batcher=True)
+
+    # Top-K = last K slots after ascending sort
+    top_k = Array(K, packed_t)
+    @for_range(K)
+    def _(i):
+        top_k[i] = table[N - 1 - i]
+    return top_k
+
+# =============== Data Ingress ===============
+
+# A-side private input loading moved to module1_backend.load_private_inputs().
+# =============== Main ===============
+
+def main():
+    print_ln("===== Baseline: All-Boolean + Batcher Sort =====")
+    print_ln("  N_F=%s  K=%s", N_F, K)
+
+    A_scores, A_valid = module1_backend.load_private_inputs(N_F)
+
+    # --- Timer M1: MPC Ingress + Aggregation (Arithmetic sint) ---
+    print_ln("--- Timer M1: MPC Ingress + Aggregation ---")
+    start_timer(1)
+    # M_MAX is a top-level constant (see Parameters section above)
+    cpsi_flags, cpsi_scores, overflow_flags = module1_backend.load_external_cpsi_shares(N_F, M_MAX)
+    valid_flags, s_A_array, s_B_array = module1_backend.aggregation_layer(
+        cpsi_flags, cpsi_scores, overflow_flags, A_scores, A_valid, N_F, M_MAX
+    )
+    stop_timer(1)
+
+    # --- Timer M2: Score Composition + Domain Conversion (sint -> sbitint) ---
+    print_ln("--- Timer M2: Score Composition + Domain Conversion ---")
+    start_timer(2)
+    total_scores = bs_core.compose_scores(valid_flags, s_A_array, s_B_array, N_F)
+    candidate_table_sint = bs_core.prepare_candidate_table(
+        valid_flags, total_scores, N_F, VALID_SHIFT, SCORE_SHIFT, MAX_TIE
+    )
+    # edaBit domain conversion: sint -> sbitint(64)
+    candidate_table_ab = Array(N_F, packed_t)
+    @for_range(N_F)
+    def _(i):
+        candidate_table_ab[i] = packed_t(candidate_table_sint[i])
+    stop_timer(2)
+
+    # --- Timer M3: Module 2 (Boolean Batcher Sort) ---
+    print_ln("--- Timer M3: Module 2 (Boolean Batcher Sort) ---")
+    start_timer(3)
+    top_k_handles = secure_batcher_sort_topk_boolean(candidate_table_ab, N_F, K)
+    stop_timer(3)
+
+    print_ln("\n--- Top-K Results ---")
+    @for_range(K)
+    def _(i):
+        # Never reveal the tie tag (paper 6.1: "never reconstructed, excluded
+        # from rho"). Bitwise right-shift out TIE_BITS in the Boolean domain,
+        # then reveal only the (valid || score) segment.
+        vs_part = top_k_handles[i] >> TIE_BITS
+        vs_clear = vs_part.reveal()
+        valid = (vs_clear >> SCORE_BITS) & 1
+        score = vs_clear & ((1 << SCORE_BITS) - 1)
+        print_ln("TOPK_CSV,%s,%s,%s", i, valid, score)
+
+    print_ln("===== Boolean Batcher Baseline Complete =====")
+
+main()

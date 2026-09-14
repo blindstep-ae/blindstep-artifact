@@ -1,0 +1,7 @@
+variant,integer_triples,edabits,bit_triples,rev
+hybrid_queue,188222,-,-,3fec8a9
+hybrid_partial_select,-,-,-,3fec8a9
+hybrid_batcher_sort,494022,-,-,3fec8a9
+ab_queue,2304,-,405110,3fec8a9
+ab_partial_select,2304,-,-,3fec8a9
+ab_batcher_sort,2304,-,811959,3fec8a9

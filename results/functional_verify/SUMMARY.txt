@@ -1,0 +1,67 @@
+artifact rev (v2)  : 8192e45
+MPSPDZ_DIR         : <SERVER>/mpspdz-aetest
+output dir         : <SERVER>/blindstep/results/functional_verify
+
+==================== S0: python module shadow check ====================
+no shadow module copies detected
+
+==================== S1: compile smoke test (all programs) ====================
+PASS: compile -R 64 blindstep_full
+PASS: compile -R 64 blindstep_module1
+PASS: compile -R 64 blindstep_module2
+PASS: compile -R 64 blindstep_full_ab_queue
+PASS: compile -R 64 blindstep_full_ab_partial_select
+PASS: compile -R 64 baseline_hybrid_queue
+PASS: compile -R 64 baseline_hybrid_partial_select
+PASS: compile -R 64 baseline_hybrid_batcher_sort
+PASS: compile -R 64 baseline_hybrid_batcher_sort_m2only
+PASS: compile -R 64 baseline_hybrid_sort
+PASS: compile -R 64 baseline_ab_batcher_sort
+PASS: compile -B 64 baseline_ab_queue
+PASS: compile -B 64 baseline_ab_sort
+
+==================== S2: cross-variant Top-K agreement (six variants, one share file) ====================
+[BLINDSTEP] M_MAX=3 (source: CLI --m-max)
+[BLINDSTEP] N_F=256  share_rows_per_party=2304  (2*N_F=512 A-side + N_F*(2*M_MAX+1)=1792 CPSI slots)
+[SIMULATOR] Writing shares to <SERVER>/mpspdz-aetest/Player-Data ...
+[SIMULATOR] Done. Wrote 2304 rows per file.
+[SIMULATOR] Verify: wc -l <SERVER>/mpspdz-aetest/Player-Data/Input-P0-0  →  expected 2304
+reference Top-K from hybrid_queue:
+    0,1,1123
+    1,1,1111
+    2,1,1099
+    3,1,1087
+    4,1,1075
+PASS: S2: hybrid_partial_select agrees with hybrid_queue
+PASS: S2: hybrid_batcher_sort agrees with hybrid_queue
+PASS: S2: ab_queue agrees with hybrid_queue
+PASS: S2: ab_partial_select agrees with hybrid_queue
+PASS: S2: ab_batcher_sort agrees with hybrid_queue
+
+==================== S3: overflow injection — fail-closed abort, no Top-K output ====================
+[BLINDSTEP] M_MAX=3 (source: CLI --m-max)
+[BLINDSTEP] N_F=256  share_rows_per_party=2304  (2*N_F=512 A-side + N_F*(2*M_MAX+1)=1792 CPSI slots)
+[SIMULATOR] Writing shares to <SERVER>/mpspdz-aetest/Player-Data ...
+[SIMULATOR] Done. Wrote 2304 rows per file.
+[SIMULATOR] Verify: wc -l <SERVER>/mpspdz-aetest/Player-Data/Input-P0-0  →  expected 2304
+PASS: S3: fail-closed abort message present
+PASS: S3: zero TOPK_CSV lines after abort
+
+==================== S4: bounded one-to-many aggregation — A[3]=321, A[6]=657, A[9]=139 ====================
+[BLINDSTEP] M_MAX=3 (source: CLI --m-max)
+[BLINDSTEP] N_F=256  share_rows_per_party=2304  (2*N_F=512 A-side + N_F*(2*M_MAX+1)=1792 CPSI slots)
+[SIMULATOR] Writing shares to <SERVER>/mpspdz-aetest/Player-Data ...
+[SIMULATOR] Done. Wrote 2304 rows per file.
+[SIMULATOR] Verify: wc -l <SERVER>/mpspdz-aetest/Player-Data/Input-P0-0  →  expected 2304
+PASS: S4: CSV,3,1,321
+PASS: S4: CSV,6,1,657
+PASS: S4: CSV,9,1,139
+
+==================== S5: cost snapshot (blindstep_full, N=256, single LAN run) ====================
+    side  time_s   global_MB  rounds
+    v2    4.63678  397.101    33148
+    (indicative only; use rerun_camera_ready.sh for table numbers)
+
+==================== RESULT ====================
+ALL CHECKS PASSED  (v2=8192e45)
+Summary saved to results/functional_verify/SUMMARY.txt

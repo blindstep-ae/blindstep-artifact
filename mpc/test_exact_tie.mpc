@@ -1,0 +1,59 @@
+# TEST-ONLY: reveals tie tags by design; never run in the measured pipeline.
+import sys
+sys.path.append('mpc')
+import bs_core
+from Compiler.types import *
+from Compiler.library import *
+
+N_F = 4
+K = 2
+SCORE_BITS = 16
+
+TIE_BITS, PACKED_BITS, SCORE_SHIFT, VALID_SHIFT, MAX_TIE = bs_core.get_tuple_shifts(N_F, SCORE_BITS)
+
+valid_flags = Array(N_F, sint)
+total_scores = Array(N_F, sint)
+
+@for_range_opt(N_F)
+def _(i):
+    valid_flags[i] = sint(1)
+    total_scores[i] = sint(100)
+
+# 1. Use the exact prepare_candidate_table to generate random tie tags
+candidate_table = bs_core.prepare_candidate_table(valid_flags, total_scores, N_F, VALID_SHIFT, SCORE_SHIFT, MAX_TIE)
+
+# We reveal the ties directly by decoding the candidate table
+print_ln("=== Generated Ties ===")
+@for_range_opt(N_F)
+def _(i):
+    packed_res = candidate_table[i].reveal()
+    valid, score, tie = bs_core.decode_tuple(packed_res, VALID_SHIFT, SCORE_SHIFT, SCORE_BITS, TIE_BITS, MAX_TIE)
+    print_ln("Candidate %s (Tie: %s)", i, tie)
+
+# 2. Use module 2's secure_insertion_queue
+# Define it here for simplicity
+def secure_insertion_queue(candidates, N, K_val):
+    queue = Array(K_val, sint)
+    queue.assign_all(sint(0))
+    @for_range(N)
+    def _(i):
+        current_candidate = MemValue(candidates[i])
+        @for_range(K_val)
+        def _(j):
+            active_q_item = queue[j]
+            active_c_item = current_candidate.read()
+            is_greater = active_c_item > active_q_item
+            new_q_item = is_greater.if_else(active_c_item, active_q_item)
+            next_candidate = is_greater.if_else(active_q_item, active_c_item)
+            queue[j] = new_q_item
+            current_candidate.write(next_candidate)
+    return queue
+
+top_k_results = secure_insertion_queue(candidate_table, N_F, K)
+
+print_ln("=== Top K Results ===")
+@for_range_opt(K)
+def _(i):
+    packed_res = top_k_results[i].reveal()
+    valid, score, tie = bs_core.decode_tuple(packed_res, VALID_SHIFT, SCORE_SHIFT, SCORE_BITS, TIE_BITS, MAX_TIE)
+    print_ln("Rank %s: Valid=%s, Score=%s, Tie=%s", i, valid, score, tie)

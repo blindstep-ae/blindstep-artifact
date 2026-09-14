@@ -1,0 +1,73 @@
+# mpc/baseline_hybrid_queue.mpc
+# -------------------------------------------------------------------
+# Domain: Hybrid MPC (Arithmetic Aggregation -> Boolean Selection)
+# Selection: Fixed-Size Secure Insertion Queue
+# Role: Our proposed baseline in the 2x2 benchmark matrix (WP5)
+# Compile: ./compile.py -R 64 baseline_hybrid_queue
+# -------------------------------------------------------------------
+
+from Compiler.types import sint, Array, MemValue
+from Compiler.library import for_range, print_ln
+
+# =============== Parameters (Frozen Spec) ===============
+N_max = 128
+K = 5
+b = 16
+
+# --- Bit-width Derivation (Pure Integer Logic) ---
+t = (N_max - 1).bit_length()  # purely numeric integer logic
+w = 1 + b + t                 # canonical packing width anchor
+
+# --- Layout Offsets ---
+score_shift = t
+valid_shift = t + b
+
+# Safety assertion: ensure w fits in the ring (default ring size 64 bits)
+assert w < 60, f"Packed width w={w} exceeds safe ring margin (60-bit cap for sint headroom)."
+
+# =============== Core Primitive ===============
+def secure_insertion_queue(candidates_packed, N, K):
+    """
+    Fixed-Size Secure Insertion Queue.
+    Complexity: O(N * K) Compare-And-Swap (CAS) operations.
+    Domain boundary:
+      - Score aggregation is ARITHMETIC (cheap ring addition).
+      - secure comparison invokes the framework's comparison path across the arithmetic/Boolean boundary.
+      - if_else() routes values back in the arithmetic ring.
+    All operations remain within sint. No reveal() calls inside this function.
+    """
+    buffer = Array(K, sint)
+    tau_bot = sint(0)   # Dummy sentinel: (valid=0, score=0, tie=0) packs to 0
+
+    @for_range(K)
+    def _(p):
+        buffer[p] = tau_bot
+
+    @for_range(N)
+    def process_candidate(i):
+        # Mandatory: MemValue to carry state across nested @for_range
+        current_x = MemValue(candidates_packed[i])
+
+        @for_range(K)
+        def cas_step(p):
+            bp  = buffer[p]
+            cx  = current_x.read()
+            is_cx_greater = cx > bp
+            new_bp = is_cx_greater.if_else(cx, bp)
+            new_cx = is_cx_greater.if_else(bp, cx)
+            buffer[p] = new_bp
+            current_x.write(new_cx)
+
+    return buffer
+
+# =============== Top-level Driver ===============
+# Prevent optimization from stripping out the circuit
+print_ln("--- Hybrid Queue Baseline Execution ---")
+
+candidates = Array(N_max, sint)
+@for_range(N_max)
+def _(i):
+    candidates[i] = sint.get_input_from(0)
+
+# Evaluate insertion queue without revealing the outcome
+top_k_handles = secure_insertion_queue(candidates, N_max, K)

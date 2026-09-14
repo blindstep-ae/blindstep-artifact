@@ -1,0 +1,125 @@
+"""
+BlindStep Module 1 v3.0: Real Circuit PSI Integration
+=====================================================
+Compile : ./compile.py -R 64 blindstep_module1
+Run     : ./Scripts/semi2k.sh blindstep_module1
+
+Features external OPPRF-CPSI preprocessing integration.
+Provides O(N_F * M) secret-shared ingress handling,
+and strict row-wise one-to-many aggregations strictly aligned with A[i].
+
+Key Encoding Assumption:
+  All keys are PRE-ENCODED as fixed-width integers before entering
+  the MPC circuit (dictionary encoding or salted hash).
+  String keys are NEVER processed inside this circuit.
+
+Join Semantics (bounded-slot consumption, one-to-many, row-aligned):
+  The key-matching join runs OUTSIDE this circuit, in the external OPPRF-CPSI
+  backend. This kernel never sees keys and performs no O(N_F * N_E) pairwise
+  comparison. A single A_key[i] may match multiple B_key[j]; the backend
+  reports up to M_MAX of those matches for row i as secret-shared slots
+  (flag_im, score_im), plus one overflow bit, and the kernel aggregates only
+  inside that bounded window:
+    s_B_array[i] = SUM_{m < M_MAX} ( flag_im * score_im )
+  Loop bounds depend only on the public parameters (N_F, M_MAX), so the access
+  pattern is fixed-shape regardless of a row's true match count.
+
+Overflow note (fail-closed):
+  One output row per A-side candidate, so the output table size is bounded by
+  N_F by construction — no internal candidate-table inflation. Rows whose true
+  match count exceeds the M_MAX slot budget are flagged by the backend's
+  per-row overflow bit. aggregation_layer() sums those bits in the secret
+  domain, reveals a SINGLE bit (did any row overflow?), and aborts the protocol
+  when it is set. The overflowing-row COUNT is never revealed (Definition 5.2).
+  A stricter table budget (TABLE_CAP < N_F), if ever needed, would still be
+  enforced by the upper-level system at the Module 1 input or output stage.
+
+Tie-breaker:
+  tie = an independent random tag drawn per candidate inside the circuit
+  (sint.get_random_int(TIE_BITS) via bs_core.prepare_candidate_table). It is
+  NOT the query-local candidate index and NOT a long-term opaque handle. If
+  cross-step reveal were ever needed, a refresh / rerandomization mechanism
+  would have to be added; this artifact does not implement handle refresh.
+"""
+import math
+
+# =============== Parameters ===============
+N_F = 256         # Frontier table size (Party 0 / Agent A)
+N_E = 256         # Extension table size (Party 1 / Agent B)
+K = 5
+SCORE_BITS = 16
+M_MAX = 3         # CPSI slot budget per A-row; edit here to sweep (must match share file)
+# (No TABLE_CAP: output table size = N_F by construction. Per-row slot overflow
+#  is handled fail-closed via the backend's overflow bits. See header.)
+
+import bs_core
+import module1_backend
+
+# --- Bit-width derivation ---
+TIE_BITS, PACKED_BITS, SCORE_SHIFT, VALID_SHIFT, MAX_TIE = bs_core.get_tuple_shifts(N_F, SCORE_BITS)
+
+assert PACKED_BITS < 64, f"Packed width {PACKED_BITS} exceeds safe ring margin"
+
+# Modules are now imported via bs_core.py
+
+# =============== A-side Private Input ===============
+# A_scores / A_valid are consumed from the real share file (perf.cpp /
+# scripts/simulate_cpp_writer.py) via module1_backend.load_private_inputs().
+# The old embedded load_mock_data() has been removed: it skipped the 2*N_F
+# A-side prefix that the writer emits and therefore misread the A_scores rows
+# as CPSI flag shares. The B-side is delivered entirely through the CPSI share
+# stream (load_external_cpsi_shares), so no mock B data is needed here.
+# With the default (non-injected) writer, A_scores[i] = 3*(i+1) and A_valid[i]
+# = 1, identical to the previous mock values — zero semantic change; v2
+# only restores correct input-stream alignment and enables the F1 injection
+# path (BLINDSTEP_F1_INJECT / BLINDSTEP_INJECT_OVERFLOW).
+
+# =============== Main ===============
+
+def main():
+    print_ln("===== BlindStep Module 1 v2.0: Secure Join Kernel =====")
+    print_ln("  N_F=%s  N_E=%s  K=%s  SCORE_BITS=%s", N_F, N_E, K, SCORE_BITS)
+
+    # Consume the A-side prefix from the real share file BEFORE the CPSI slots,
+    # matching the writer's line order (perf.cpp / simulate_cpp_writer.py).
+    A_scores, A_valid = module1_backend.load_private_inputs(N_F)
+
+    # --- Timer 1a: Circuit PSI Backend ---
+    print_ln("--- Timer 1a: Circuit PSI Backend (External Ingress) ---")
+    start_timer(1)
+    # M_MAX is a top-level constant (see Parameters section above)
+    cpsi_flags, cpsi_scores, overflow_flags = module1_backend.load_external_cpsi_shares(N_F, M_MAX)
+    stop_timer(1)
+    
+    # --- Timer 1b: BlindStep Aggregation Layer ---
+    print_ln("--- Timer 1b: BlindStep Aggregation Layer ---")
+    start_timer(11) # use 11 for 1b
+    # M_MAX is a top-level constant (see Parameters section above)
+    valid_flags, s_A_array, s_B_array = module1_backend.aggregation_layer(
+        cpsi_flags, cpsi_scores, overflow_flags, A_scores, A_valid, N_F, M_MAX
+    )
+    stop_timer(11)
+
+    # --- Timer 2: Score Composition + Packing ---
+    print_ln("--- Timer 2: Score Composition + Packing ---")
+    start_timer(2)
+    total_scores = bs_core.compose_scores(valid_flags, s_A_array, s_B_array, N_F)
+    candidate_table = bs_core.prepare_candidate_table(
+        valid_flags, total_scores, N_F, VALID_SHIFT, SCORE_SHIFT, MAX_TIE
+    )
+    stop_timer(2)
+
+    # --- Verification reveal ---
+    print_ln("\n--- Verification Output ---")
+    @for_range(N_F)
+    def _(i):
+        packed_res = candidate_table[i].reveal()
+        valid, score, tie = bs_core.decode_tuple(packed_res, VALID_SHIFT, SCORE_SHIFT, SCORE_BITS, TIE_BITS, MAX_TIE)
+        @if_(valid > 0)
+        def _():
+            print_ln("CSV,%s,%s,%s", i, valid, score)
+
+
+    print_ln("===== Module 1 Complete =====")
+
+main()

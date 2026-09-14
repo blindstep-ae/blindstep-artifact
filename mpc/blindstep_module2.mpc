@@ -1,0 +1,116 @@
+"""
+# Compilation and Execution over Path A Prototype:
+# ./compile.py -R 64 blindstep_module2
+# ./Scripts/semi2k.sh blindstep_module2
+#
+# NOTE: This is the Path A prototype (Ring-based semi-honest). 
+# It is NOT the final mixed-circuit benchmark version.
+"""
+import math
+
+# =============== Parameters (Frozen Spec) ===============
+N_MAX = 128
+K = 5
+SCORE_BITS = 16
+
+# --- Bit-width Derivation (Pure Integer Logic) ---
+# t = ceil(log2(N_max)), using bit_length for robustness
+TIE_BITS = (N_MAX - 1).bit_length() 
+# w = 1 + b + t (The canonical anchor for packed representation)
+PACKED_BITS = 1 + SCORE_BITS + TIE_BITS
+
+# --- Layout Offsets ---
+TIE_SHIFT   = 0
+SCORE_SHIFT = TIE_BITS
+VALID_SHIFT = TIE_BITS + SCORE_BITS
+
+MAX_TIE = (2 ** TIE_BITS) - 1
+
+# =============== Helper Functions ===============
+def encode_tuple(valid, score, tie):
+    """
+    Encodes (valid, score, tie) into a conceptual packed representation.
+    Layout (high to low): [valid: 1 bit] [score: b bits] [inverted_tie: t bits]
+    Note: We enforce this conceptual packing to cleanly serialize the data.
+    Do not mistakenly assume this is 'free native integer comparison' in practice for all schemes.
+    """
+    inverted_tie = MAX_TIE - tie
+    return valid * (2 ** VALID_SHIFT) + score * (2 ** SCORE_SHIFT) + inverted_tie
+
+def decode_tuple(packed_clear):
+    """
+    Decodes the conceptual packed representation back to (valid, score, tie).
+    Revealing and decoding is strictly for debug and tests.
+    """
+    # Must use integer shifts/division so the type stays cint; float
+    # conversion would overflow or lose precision.
+    valid = packed_clear >> VALID_SHIFT
+    score = (packed_clear >> SCORE_SHIFT) & ((1 << SCORE_BITS) - 1)
+    inverted_tie = packed_clear & ((1 << TIE_BITS) - 1)
+    tie = MAX_TIE - inverted_tie
+    return valid, score, tie
+
+# =============== Standalone Verification: Synthetic Candidates ===============
+# This program is a standalone Module 2 correctness verifier.
+# It uses synthetic candidates to confirm insertion-queue Top-K logic.
+# It is NOT on any performance-measurement code path and does NOT use
+# module1_backend. For integrated perf benchmarks, use blindstep_full.mpc.
+def load_mock_candidates():
+    inputs = Array(N_MAX, sint)
+    @for_range(N_MAX)
+    def _(i):
+        # Synthetic data: first 10 slots have valid=1 and score i*10.
+        valid_val = sint(i < 10)
+        score_val = valid_val * i * 10
+        tie_val = sint(i)
+        inputs[i] = encode_tuple(valid_val, score_val, tie_val)
+    return inputs
+
+# =============== Module 2: Secure Insertion Queue (Top-K) ===============
+def secure_insertion_queue(candidates):
+    # Fixed-Size Secure Insertion Queue setup
+    queue = Array(K, sint)
+    
+    # Dummy sentinel tau_bot = pack(valid=0, score=0, tie=0) = MAX_TIE under the
+    # inverted-tie packing above (matches the paper/oracle dummy tuple).
+    dummy_packed = sint(MAX_TIE)
+    queue.assign_all(dummy_packed)
+    
+    # Target complexity: O(N_max * K) tuple comparisons
+    @for_range(N_MAX)
+    def _(i):
+        # Mandatory invariant: Use MemValue to pipe state correctly on nested @for_range
+        current_candidate = MemValue(candidates[i])
+        
+        @for_range(K)
+        def _(j):
+            active_q_item = queue[j]
+            active_c_item = current_candidate.read()
+            
+            is_greater = active_c_item > active_q_item
+            
+            new_q_item = is_greater.if_else(active_c_item, active_q_item)
+            next_candidate = is_greater.if_else(active_q_item, active_c_item)
+            
+            queue[j] = new_q_item
+            current_candidate.write(next_candidate)
+            
+    return queue
+
+# =============== Main: Standalone Module 2 Correctness Verification ===============
+def main():
+    print_ln("[blindstep_module2] Standalone Module 2 verification (synthetic candidates).")
+    print_ln("Running Secure Insertion Queue...")
+    candidates = load_mock_candidates()
+    top_k_results = secure_insertion_queue(candidates)
+    
+    # WARNING: reveal() is ONLY permitted for debug/verification purposes.
+    print_ln("Outputting Decoded Results (Verification Only):")
+    @for_range(K)
+    def _(i):
+        packed_res = top_k_results[i].reveal()
+        valid, score, tie = decode_tuple(packed_res)
+        print_ln("Rank %s: Valid=%s, Score=%s", i, valid, score)
+        print_ln("CSV,%s,%s,%s", i, valid, score)
+
+main()

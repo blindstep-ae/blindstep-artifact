@@ -1,0 +1,121 @@
+from Compiler.types import sint, Array, MemValue
+from Compiler.library import for_range, print_ln, start_timer, stop_timer
+from Compiler.GC.types import sbitint
+import bs_core
+import module1_backend
+
+"""
+BlindStep All-Boolean Selection Full Pipeline: Hybrid Aggregation + Boolean Partial Select
+================================================================================
+Compile : ./compile.py -R 64 blindstep_full_ab_partial_select
+Run     : ./Scripts/semi2k.sh blindstep_full_ab_partial_select
+
+IMPORTANT: use -R 64 / semi2k.sh (NOT -B 64 / yao.sh). Module 1 uses sint
+arithmetic (load_external_cpsi_shares, aggregation_layer) which requires the
+semi2k protocol; only Module 2 runs in the Boolean domain. This matches
+scripts/run_main_table_n5.sh, which is how the paper's numbers were produced.
+
+This benchmark implements a hybrid pipeline:
+  1. Aggregation in Arithmetic domain (sint)
+  2. Domain Conversion (sint -> sbitint) - measures edaBit conversion cost
+  3. Selection in Boolean domain (sbitint) using K-pass Bubble-Select (Partial Selection)
+"""
+
+# =============== Parameters ===============
+N_F = 256
+N_E = 256
+K = 5
+SCORE_BITS = 16
+M_MAX = 3         # CPSI slot budget per A-row; edit here to sweep (must match share file)
+
+# --- Bit-width derivation ---
+TIE_BITS, PACKED_BITS, SCORE_SHIFT, VALID_SHIFT, MAX_TIE = bs_core.get_tuple_shifts(N_F, SCORE_BITS)
+# Use 64-bit to match sint range and prevent truncation of high valid bit (bit 24)
+packed_t = sbitint.get_type(64)
+
+# =============== Module 2: Secure Partial Selection (Boolean) ===============
+
+def secure_partial_select_boolean(candidates, N, K):
+    """
+    K passes of oblivious bubble sort in Boolean Domain (GC).
+    """
+    table = Array(N, packed_t)
+    @for_range(N)
+    def _(i):
+        table[i] = candidates[i]
+
+    @for_range(K)
+    def _(k):
+        # Python loop index k ensures compile-time unrolling of range
+        @for_range(N - 1 - k)
+        def _(i):
+            c1 = table[i]
+            c2 = table[i + 1]
+            is_greater = c1 > c2
+            table[i]     = is_greater.if_else(c2, c1)
+            table[i + 1] = is_greater.if_else(c1, c2)
+
+    top_k = Array(K, packed_t)
+    @for_range(K)
+    def _(i):
+        # Grab from the end, largest first
+        top_k[i] = table[N - 1 - i]
+    return top_k
+
+# =============== Data Ingress (Real) ===============
+
+# A-side private input loading moved to module1_backend.load_private_inputs().
+# =============== Main: 3-Phase Breakdown ===============
+
+def main():
+    print_ln("===== All-Boolean Selection Full Pipeline (Hybrid Agg + Boolean Partial Select) =====")
+    print_ln("  N_F=%s  K=%s", N_F, K)
+
+    A_scores, A_valid = module1_backend.load_private_inputs(N_F)
+
+    # --- Timer M1: Aggregation (Arithmetic) ---
+    print_ln("--- Timer M1: Aggregation (Arithmetic) ---")
+    start_timer(1)
+    # M_MAX is a top-level constant (see Parameters section above)
+    cpsi_flags, cpsi_scores, overflow_flags = module1_backend.load_external_cpsi_shares(N_F, M_MAX)
+    valid_flags, s_A_array, s_B_array = module1_backend.aggregation_layer(
+        cpsi_flags, cpsi_scores, overflow_flags, A_scores, A_valid, N_F, M_MAX
+    )
+    stop_timer(1)
+
+    # --- Timer M2: Score Composition + Domain Conversion (edaBit) ---
+    print_ln("--- Timer M2: Score Composition + Domain Conversion (edaBit) ---")
+    start_timer(2)
+    total_scores = bs_core.compose_scores(valid_flags, s_A_array, s_B_array, N_F)
+    candidate_table_sint = bs_core.prepare_candidate_table(
+        valid_flags, total_scores, N_F, VALID_SHIFT, SCORE_SHIFT, MAX_TIE
+    )
+    
+    # [DOMAIN CONVERSION] Explicitly trigger sint -> sbitint conversion
+    candidate_table_ab = Array(N_F, packed_t)
+    @for_range(N_F)
+    def _(i):
+        candidate_table_ab[i] = packed_t(candidate_table_sint[i])
+    stop_timer(2)
+
+    # --- Timer M3: Selection (Boolean Partial Select) ---
+    print_ln("--- Timer M3: Module 2 (Boolean Partial Select) ---")
+    start_timer(3)
+    top_k_handles = secure_partial_select_boolean(candidate_table_ab, N_F, K)
+    stop_timer(3)
+
+    print_ln("\n--- Top-K Results ---")
+    @for_range(K)
+    def _(i):
+        # Never reveal the tie tag (paper 6.1: "never reconstructed, excluded
+        # from rho"). Bitwise right-shift out TIE_BITS in the Boolean domain,
+        # then reveal only the (valid || score) segment.
+        vs_part = top_k_handles[i] >> TIE_BITS
+        vs_clear = vs_part.reveal()
+        valid = (vs_clear >> SCORE_BITS) & 1
+        score = vs_clear & ((1 << SCORE_BITS) - 1)
+        print_ln("TOPK_CSV,%s,%s,%s", i, valid, score)
+
+    print_ln("===== All-Boolean Selection Pipeline Complete =====")
+
+main()

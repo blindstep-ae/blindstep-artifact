@@ -1,0 +1,91 @@
+"""
+BlindStep Baseline: Hybrid + Batcher Sort (Module-2 Only) — Patched
+====================================================================
+Compile : ./compile.py -R 64 baseline_hybrid_batcher_sort_m2only
+Run     : ./Scripts/semi2k.sh baseline_hybrid_batcher_sort_m2only
+
+Module-2 only benchmark using synthetic mock candidates.
+Uses Array.sort(batcher=True) — MP-SPDZ built-in Batcher odd-even merge sort.
+
+PATCH: tie tags now use vectorized sint.get_random_int() via bs_core.prepare_candidate_table
+       instead of deterministic sint(i), matching the full-pipeline behaviour.
+"""
+
+import math
+import bs_core
+
+# =============== Parameters ===============
+N_MAX = 128
+K = 5
+SCORE_BITS = 16
+
+TIE_BITS, PACKED_BITS, SCORE_SHIFT, VALID_SHIFT, MAX_TIE = bs_core.get_tuple_shifts(N_MAX, SCORE_BITS)
+
+def load_mock_candidates():
+    """
+    Synthetic candidates using bs_core.prepare_candidate_table for random tie tags.
+    Same score distribution as the old version for fair comparison.
+    """
+    valid_flags = Array(N_MAX, sint)
+    total_scores = Array(N_MAX, sint)
+
+    @for_range_opt(N_MAX)
+    def _(i):
+        is_match = (i >= 5) * (i <= 15)
+        valid_val = sint(is_match)
+        s_A = valid_val * (i * 2)
+        s_B = valid_val * (i * 3)
+        valid_flags[i] = valid_val
+        total_scores[i] = s_A + s_B
+
+    # Uses vectorized get_random_int — matches full-pipeline tie semantics
+    candidates = bs_core.prepare_candidate_table(
+        valid_flags, total_scores, N_MAX, VALID_SHIFT, SCORE_SHIFT, MAX_TIE
+    )
+    return candidates
+
+def batcher_sort_topk(candidates, N, K_val):
+    """
+    Batcher odd-even merge sort via MP-SPDZ Array.sort(batcher=True).
+    Pure compare-and-swap network, no reveal, same leakage profile as
+    insertion queue and partial-select.
+    After ascending sort, top-K = last K elements (largest packed value).
+    """
+    arr = Array(N, sint)
+    @for_range(N)
+    def _(i):
+        arr[i] = candidates[i]
+
+    arr.sort(batcher=True)
+
+    top_k = Array(K_val, sint)
+    @for_range(K_val)
+    def _(i):
+        top_k[i] = arr[N - 1 - i]
+    return top_k
+
+def main():
+    print_ln("--- Hybrid Batcher Sort Baseline (Module-2 Only, Patched Random Ties) ---")
+    print_ln("  N_MAX=%s  K=%s  b=%s", N_MAX, K, SCORE_BITS)
+
+    start_timer(1)
+    candidates = load_mock_candidates()
+    stop_timer(1)
+
+    start_timer(2)
+    top_k_handles = batcher_sort_topk(candidates, N_MAX, K)
+    stop_timer(2)
+
+    @for_range(K)
+    def _(i):
+        # Never reveal the tie tag (paper 6.1: "never reconstructed, excluded
+        # from rho"). Right-shift out TIE_BITS in the secret domain and reveal
+        # only the (valid || score) segment. Explicit bit-length => exact
+        # truncation, not probabilistic.
+        vs_part = top_k_handles[i].right_shift(TIE_BITS, PACKED_BITS)
+        vs_clear = vs_part.reveal()
+        valid = (vs_clear >> SCORE_BITS) & 1
+        score = vs_clear & ((1 << SCORE_BITS) - 1)
+        print_ln("RAW_CSV,%s,%s,%s", i, valid, score)
+
+main()

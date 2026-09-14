@@ -1,0 +1,113 @@
+"""
+[DEPRECATED] BlindStep Hybrid Baseline: Full Oblivious Sort
+=============================================================
+STATUS: Not in paper Section 6 comparison matrix.
+REASON: Uses load_mock_candidates() instead of real module1_backend CPSI
+        ingress. Module 1 is NOT shared with blindstep_full.mpc.
+        For the fair hybrid-sort baseline (same Module 1), use:
+          baseline_hybrid_batcher_sort.mpc
+
+Domain    : Hybrid MPC (-R 64)
+Selection : Bitonic Sort, full N_MAX
+"""
+import math
+
+# =============== Parameters (Frozen Spec) ===============
+N_MAX = 128
+K = 5
+SCORE_BITS = 16
+
+# --- Bit-width Derivation (Pure Integer Logic) ---
+# t = ceil(log2(N_max)), using bit_length for robustness
+TIE_BITS = (N_MAX - 1).bit_length() 
+# w = 1 + b + t (The canonical anchor for packed representation)
+PACKED_BITS = 1 + SCORE_BITS + TIE_BITS
+
+# --- Layout Offsets ---
+TIE_SHIFT   = 0
+SCORE_SHIFT = TIE_BITS
+VALID_SHIFT = TIE_BITS + SCORE_BITS
+
+MAX_TIE = (2 ** TIE_BITS) - 1
+
+def encode_tuple(valid, score, tie):
+    inverted_tie = MAX_TIE - tie
+    return valid * (2 ** VALID_SHIFT) + score * (2 ** SCORE_SHIFT) + inverted_tie
+
+def decode_tuple(packed_clear):
+    # Must use integer shifts/division so the type stays cint; float
+    # conversion would overflow or lose precision.
+    valid = packed_clear >> VALID_SHIFT
+    score = (packed_clear >> SCORE_SHIFT) & ((1 << SCORE_BITS) - 1)
+    inverted_tie = packed_clear & ((1 << TIE_BITS) - 1)
+    tie = MAX_TIE - inverted_tie
+    return valid, score, tie
+
+def load_mock_candidates():
+    inputs = Array(N_MAX, sint)
+    @for_range(N_MAX)
+    def _(i):
+        is_match = (i >= 5) * (i <= 15)
+        valid_val = sint(is_match)
+        s_A = valid_val * (i * 2)
+        s_B = valid_val * (i * 3)
+        # Domain Boundary: In Hybrid (-R), this is a native low-cost Arithmetic Adder
+        s_tot = s_A + s_B
+        inputs[i] = encode_tuple(valid_val, s_tot, sint(i))
+    return inputs
+
+def full_oblivious_sort(candidates):
+    arr = Array(N_MAX, sint)
+    @for_range(N_MAX)
+    def _(i):
+        arr[i] = candidates[i]
+        
+    # Python-level unrolled Bitonic Sort network generating O(N log^2 N) comparators
+    k_step = 2
+    while k_step <= N_MAX:
+        j_step = k_step // 2
+        while j_step > 0:
+            for i in range(N_MAX):
+                ixj = i ^ j_step
+                if ixj > i:
+                    dir_desc = (i & k_step) == 0
+                    
+                    x = MemValue(arr[i])
+                    y = MemValue(arr[ixj])
+                    
+                    # Domain Boundary: Here, `>` triggers edaBits domain switch to Boolean
+                    if dir_desc:
+                        should_swap = y.read() > x.read()
+                    else:
+                        should_swap = x.read() > y.read()
+                        
+                    new_x = should_swap.if_else(y.read(), x.read())
+                    new_y = should_swap.if_else(x.read(), y.read())
+                    
+                    arr[i] = new_x
+                    arr[ixj] = new_y
+            j_step //= 2
+        k_step *= 2
+        
+    top_k_arr = Array(K, sint)
+    @for_range(K)
+    def _(m):
+        top_k_arr[m] = arr[m]
+    return top_k_arr
+
+def main():
+    print_ln("--- Hybrid Sort Baseline ---")
+    candidates = load_mock_candidates()
+    top_k_handles = full_oblivious_sort(candidates)
+    
+    @for_range(K)
+    def _(i):
+        # Never reveal the tie tag (paper 6.1). Right-shift out TIE_BITS in the
+        # secret domain and reveal only the (valid || score) segment.
+        vs_part = top_k_handles[i].right_shift(TIE_BITS, PACKED_BITS)
+        vs_clear = vs_part.reveal()
+        valid = (vs_clear >> SCORE_BITS) & 1
+        score = vs_clear & ((1 << SCORE_BITS) - 1)
+        print_ln("CSV,%s,%s,%s", i, valid, score)
+
+main()

@@ -1,0 +1,75 @@
+===== hybrid_queue =====
+Program requires at most:
+      107849 integer bits
+        1553 integer opens
+      188222 integer triples
+      188222 integer simple multiplications
+        2304 integer inputs from player 0
+        2304 integer inputs from player 1
+       18773 virtual machine rounds
+
+===== hybrid_partial_select =====
+Program requires at most:
+         inf integer bits
+         inf integer opens
+         inf integer triples
+         inf integer simple multiplications
+        2304 integer inputs from player 0
+        2304 integer inputs from player 1
+         inf virtual machine rounds
+
+===== hybrid_batcher_sort =====
+Program requires at most:
+      271625 integer bits
+        4112 integer opens
+      494022 integer triples
+      494022 integer simple multiplications
+        2304 integer inputs from player 0
+        2304 integer inputs from player 1
+       10293 virtual machine rounds
+
+===== ab_queue =====
+Program requires at most:
+         513 loose edabits of length 64
+         514 integer opens
+      405110 bit triples
+         257 integer dabits
+        2096 bit opens
+        9216 integer bits
+        2304 integer inputs from player 0
+        2304 integer inputs from player 1
+        2304 integer triples
+        2304 integer simple multiplications
+        2560 bit mixeds
+       19471 virtual machine rounds
+
+===== ab_partial_select =====
+Program requires at most:
+         513 loose edabits of length 64
+         514 integer opens
+         inf bit triples
+         257 integer dabits
+        2096 bit opens
+        9216 integer bits
+        2304 integer inputs from player 0
+        2304 integer inputs from player 1
+        2304 integer triples
+        2304 integer simple multiplications
+         inf bit mixeds
+         inf virtual machine rounds
+
+===== ab_batcher_sort =====
+Program requires at most:
+         513 loose edabits of length 64
+         514 integer opens
+      811959 bit triples
+         257 integer dabits
+        2096 bit opens
+        9216 integer bits
+        2304 integer inputs from player 0
+        2304 integer inputs from player 1
+        2304 integer triples
+        2304 integer simple multiplications
+        3839 bit mixeds
+       24335 virtual machine rounds
+

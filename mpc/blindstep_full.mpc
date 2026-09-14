@@ -1,0 +1,147 @@
+"""
+BlindStep Full Primitive v3.0: CPSI Join + Top-K Queue
+======================================================
+Compile : ./compile.py -R 64 blindstep_full
+Run     : ./Scripts/semi2k.sh blindstep_full
+
+End-to-end pipeline with 3-phase breakdown timing:
+  Timer E1 — External CPSI / Private Join Backend   (Outside MPC)
+  Timer M1 — MPC Ingress + Aggregation              (O(N_F * M_MAX))
+  Timer M2 — Score Composition + Packing            (arithmetic adds)
+  Timer M3 — Module 2: Secure Insertion Queue Top-K (O(N_F * K))
+
+Join semantics: bounded-slot consumption, strictly row-aligned.
+  The key-matching join itself happens OUTSIDE this circuit, in the external
+  CPSI / private-join backend. This kernel never sees keys and never performs
+  an O(N_F * N_E) pairwise comparison. For each A-row i the backend delivers a
+  fixed budget of M_MAX secret-shared candidate slots (flag_im, score_im) plus
+  one overflow bit, and the kernel aggregates only within that bounded window:
+    s_B_array[i] = SUM_{m < M_MAX} (flag_im * score_im)
+  The loop bounds are the public parameters (N_F, M_MAX) alone, so the access
+  pattern is fixed-shape regardless of how many real matches a row has.
+
+Overflow note (fail-closed):
+  Output table size = N_F by construction (one row per A-side candidate), so
+  no internal candidate-table inflation is possible. Rows whose true match
+  count exceeds the M_MAX slot budget are signalled by the backend's per-row
+  overflow bit. aggregation_layer() sums those bits in the secret domain and
+  reveals a SINGLE bit — whether any row overflowed — then aborts the protocol
+  (fail-closed) if it is set. The number of overflowing rows is never revealed
+  (Definition 5.2).
+
+Tie: an independent random tag drawn per candidate inside the circuit
+  (sint.get_random_int(TIE_BITS) via bs_core.prepare_candidate_table), NOT a
+  query-local index and NOT a long-term opaque handle. It breaks score ties
+  inside the packed comparison key; it is never reconstructed and is excluded
+  from the revealed output (see the Top-K reveal below).
+"""
+import math
+
+# =============== Parameters ===============
+N_F = 256         # Frontier table size (Party 0 / Agent A)
+N_E = 256         # Extension table size (Party 1 / Agent B)
+K = 5
+SCORE_BITS = 16
+M_MAX = 3         # CPSI slot budget per A-row; edit here to sweep (must match share file)
+# (No TABLE_CAP: output table size = N_F by construction. Per-row slot overflow
+#  is handled fail-closed via the backend's overflow bits. See header.)
+
+import bs_core
+import module1_backend
+
+# --- Bit-width derivation ---
+TIE_BITS, PACKED_BITS, SCORE_SHIFT, VALID_SHIFT, MAX_TIE = bs_core.get_tuple_shifts(N_F, SCORE_BITS)
+
+assert PACKED_BITS < 64, f"Packed width {PACKED_BITS} exceeds safe ring margin"
+# Modules are now imported via bs_core.py
+
+# =============== Module 2: Secure Insertion Queue ===============
+
+def secure_insertion_queue(candidates, N, K):
+    """
+    Fixed-Size Secure Insertion Queue.
+    Complexity: O(N * K) compare-and-swap operations.
+    Unchanged from baseline_hybrid_queue — domain boundary:
+      comparison triggers edaBit switch, if_else routes in arithmetic ring.
+    """
+    queue = Array(K, sint)
+    # Sentinel = pack(valid=0, score=0, tie=0) = MAX_TIE, matching the paper's
+    # dummy (0,0,0) tuple and oracle_module2.py's dummy semantics.
+    queue.assign_all(sint(MAX_TIE))
+
+    @for_range(N)
+    def _(i):
+        current_candidate = MemValue(candidates[i])
+        @for_range(K)
+        def _(j):
+            active_q = queue[j]
+            active_c = current_candidate.read()
+            is_greater = active_c > active_q
+            queue[j] = is_greater.if_else(active_c, active_q)
+            current_candidate.write(is_greater.if_else(active_q, active_c))
+    return queue
+
+# =============== Private Input Loading ===============
+# A-side private input loading now lives in module1_backend.load_private_inputs()
+# (single source of truth, shared by all pipelines).
+
+# =============== Main: 3-Phase Breakdown ===============
+
+def main():
+    print_ln("===== BlindStep Full v2.0: Real Join + Queue Top-K =====")
+    print_ln("  N_F=%s  N_E=%s  K=%s  b=%s", N_F, N_E, K, SCORE_BITS)
+
+    A_scores, A_valid = module1_backend.load_private_inputs(N_F)
+
+    # ────────────────────────────────────────────────────────────────
+    # Timer M1: Module 1 — MPC Ingress + Aggregation
+    # ────────────────────────────────────────────────────────────────
+    print_ln("--- Timer M1: MPC Ingress + Aggregation ---")
+    start_timer(1)
+    # M_MAX is a top-level constant (see Parameters section above)
+    cpsi_flags, cpsi_scores, overflow_flags = module1_backend.load_external_cpsi_shares(N_F, M_MAX)
+    valid_flags, s_A_array, s_B_array = module1_backend.aggregation_layer(
+        cpsi_flags, cpsi_scores, overflow_flags, A_scores, A_valid, N_F, M_MAX
+    )
+    stop_timer(1)
+
+    # ────────────────────────────────────────────────────────────────
+    # Timer M2: Score Composition + Packing
+    #   Covers: arithmetic score addition + candidate tuple encoding.
+    # ────────────────────────────────────────────────────────────────
+    print_ln("--- Timer M2: Score Composition + Packing ---")
+    start_timer(2)
+    total_scores = bs_core.compose_scores(valid_flags, s_A_array, s_B_array, N_F)
+    candidate_table = bs_core.prepare_candidate_table(
+        valid_flags, total_scores, N_F, VALID_SHIFT, SCORE_SHIFT, MAX_TIE
+    )
+    stop_timer(2)
+
+    # ────────────────────────────────────────────────────────────────
+    # Timer M3: Module 2 — Secure Insertion Queue Top-K
+    #   Includes: O(N_F * K) compare-and-swap operations
+    # ────────────────────────────────────────────────────────────────
+    print_ln("--- Timer M3: Module 2 (Top-K Queue) ---")
+    start_timer(3)
+    top_k_handles = secure_insertion_queue(candidate_table, N_F, K)
+    stop_timer(3)
+
+    # ────────────────────────────────────────────────────────────────
+    # Verification output
+    # ────────────────────────────────────────────────────────────────
+    print_ln("\n--- Top-K Results ---")
+    @for_range(K)
+    def _(i):
+        # Never reconstruct the tie tag (paper 6.1: "never reconstructed, and
+        # excluded from rho"). Right-shift out TIE_BITS in the secret domain and
+        # reveal only the (valid || score) segment. Give the bit-length explicitly
+        # so truncation is exact, not probabilistic.
+        vs_part = top_k_handles[i].right_shift(TIE_BITS, PACKED_BITS)
+        vs_clear = vs_part.reveal()
+        valid = (vs_clear >> SCORE_BITS) & 1
+        score = vs_clear & ((1 << SCORE_BITS) - 1)
+        print_ln("TOPK_CSV,%s,%s,%s", i, valid, score)
+
+    print_ln("===== BlindStep Full Pipeline Complete =====")
+
+main()

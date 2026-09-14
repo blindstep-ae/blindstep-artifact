@@ -1,0 +1,115 @@
+{
+  "_meta": {
+    "source": "ACSAC camera-ready draft PDF (acsac_blindstep), extracted 2026-08-24",
+    "variant_key": {
+      "H-Queue": "hybrid_queue", "H-Select": "hybrid_partial_select", "H-Sort": "hybrid_batcher_sort",
+      "B-Queue": "ab_queue", "B-Select": "ab_partial_select", "B-Sort": "ab_batcher_sort"
+    },
+    "units": "times in seconds, communication in global MB",
+    "trials": {"table4": 7, "table5": {"default": 5, "2048": 10, "256": 7}, "table6": 3, "table13": 3, "table14": 1, "table15": 3}
+  },
+  "table4": {
+    "config": {"N": 256, "K": 5, "b": 16, "net": "LAN"},
+    "columns": ["P1", "P2", "P3", "Total", "MB", "Rounds"],
+    "rows": {
+      "hybrid_queue":          [0.937, 0.01, 3.622, 4.565, 394.8, 32988],
+      "hybrid_partial_select": [0.929, 0.01, 3.558, 4.497, 390.7, 32700],
+      "hybrid_batcher_sort":   [0.949, 0.01, 6.706, 7.655, 1037.7, 20553],
+      "ab_queue":              [0.284, 0.104, 0.323, 0.720, 9.9, 35571],
+      "ab_partial_select":     [0.285, 0.104, 0.327, 0.720, 10.3, 35322],
+      "ab_batcher_sort":       [0.290, 0.104, 0.584, 0.968, 14.8, 45325]
+    },
+    "note": "P2 for H-variants published as <0.01; stored here as 0.01 upper bound"
+  },
+  "table5": {
+    "config": {"K": 5, "b": 16, "net": "LAN", "metric": "total_s_median"},
+    "columns": [128, 256, 512, 2048, 8192],
+    "rows": {
+      "hybrid_queue":          [2.29, 4.57, 8.75, 35.06, 137.10],
+      "hybrid_partial_select": [2.26, 4.50, 8.74, 34.40, 136.74],
+      "hybrid_batcher_sort":   [3.23, 7.66, 18.48, 106.74, 577.21],
+      "ab_queue":              [0.38, 0.72, 1.28, 5.00, 18.86],
+      "ab_partial_select":     [0.40, 0.72, 1.30, 4.96, 19.30],
+      "ab_batcher_sort":       [0.50, 0.97, 2.20, 10.97, 57.43]
+    }
+  },
+  "table6": {
+    "config": {"N": 256, "K": 5, "b": 16, "net": "WAN 100ms RTT 100Mbit"},
+    "columns": ["P1", "P2", "P3", "Total", "MB", "Rounds"],
+    "rows": {
+      "hybrid_queue":          [428, 1, 1226, 1654, 394.8, 32988],
+      "hybrid_partial_select": [428, 1, 1212, 1640, 390.7, 32700],
+      "hybrid_batcher_sort":   [428, 1, 600, 1028, 1037.7, 20553],
+      "ab_queue":              [422, 334, 1029, 1786, 9.9, 35571],
+      "ab_partial_select":     [422, 334, 1016, 1773, 10.3, 35322],
+      "ab_batcher_sort":       [421, 334, 1519, 2275, 14.8, 45325]
+    },
+    "note": "H-variant P2 published as <1; stored as 1 upper bound"
+  },
+  "table8": {
+    "config": {"N": 256, "K": 5, "b": 16, "M_MAX": 3, "kind": "compile-time static estimates"},
+    "columns": ["integer_triples", "edabits", "bit_triples"],
+    "rows": {
+      "hybrid_queue":          [187392, null, null],
+      "hybrid_partial_select": ["inf", null, null],
+      "hybrid_batcher_sort":   [493192, null, null],
+      "ab_queue":              [2048, 512, 404992],
+      "ab_partial_select":     ["inf", "inf", "inf"],
+      "ab_batcher_sort":       [2048, 512, 811841]
+    }
+  },
+  "table12": {
+    "config": {"N": 8192, "K": 5, "b": 16, "net": "LAN"},
+    "columns": ["Total", "Spread", "MB"],
+    "rows": {
+      "hybrid_queue":          [137.10, 0.90, 12595],
+      "hybrid_partial_select": [136.74, 2.56, 12591],
+      "hybrid_batcher_sort":   [577.21, 13.45, 84774],
+      "ab_queue":              [18.86, 0.70, 292],
+      "ab_partial_select":     [19.30, 0.85, 293],
+      "ab_batcher_sort":       [57.43, 0.77, 920]
+    }
+  },
+  "table13": {
+    "config": {"N": 256, "K": 5, "b": 16, "net": "LAN", "variant": "hybrid_queue"},
+    "columns": ["P1", "P1_rounds", "P3", "Total", "Spread"],
+    "rows": {
+      "1":  [0.858, 6446, 3.509, 4.373, 0.205],
+      "2":  [0.877, 7470, 3.534, 4.417, 0.025],
+      "3":  [0.924, 8503, 3.500, 4.421, 0.139],
+      "5":  [0.997, 10560, 3.488, 4.491, 0.088],
+      "10": [1.178, 15707, 3.467, 4.667, 0.069]
+    },
+    "note": "P3 rounds published as 24,475 for M_max in {1,2,3,5} and 24,466 at 10"
+  },
+  "table14": {
+    "config": {"N": 256, "M_MAX": 3, "net": "LAN", "kind": "single-run"},
+    "columns": ["hits", "P1", "MB", "Rounds"],
+    "rows": {
+      "0":  [0, 1.413, 69.3, 9015],
+      "10": [26, 1.436, 69.3, 9015],
+      "50": [128, 1.427, 69.3, 9015],
+      "90": [231, 1.424, 69.3, 9015]
+    }
+  },
+  "table15": {
+    "config": {"N": 256, "K": 5, "b": 16, "kind": "RTT sweep"},
+    "columns": ["Total", "MB", "Rounds"],
+    "rows": {
+      "25ms_ab_queue":             [451.5, 10.0, 35571],
+      "25ms_hybrid_batcher_sort":  [326.3, 1037.7, 20563],
+      "50ms_ab_queue":             [896.5, 10.0, 35571],
+      "50ms_hybrid_batcher_sort":  [558.8, 1037.7, 20563],
+      "100ms_ab_queue":            [1786, 9.9, 35571],
+      "100ms_hybrid_batcher_sort": [1028, 1037.7, 20553]
+    }
+  },
+  "table16": {
+    "config": {"N": 2048, "K": 5, "b": 16, "net": "WAN 100ms RTT 100Mbit"},
+    "columns": ["P1", "P2", "P3", "Total", "MB", "Rounds"],
+    "rows": {
+      "ab_queue":            [3312, 2688, 8227, 14229, 76.2, 283687],
+      "hybrid_batcher_sort": [3409, 1.7, 9118, 12529, 15260.4, 251165]
+    }
+  }
+}

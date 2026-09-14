@@ -1,0 +1,108 @@
+from Compiler.types import sint, Array, MemValue
+from Compiler.library import for_range, print_ln, start_timer, stop_timer
+"""
+BlindStep baseline: Hybrid + Partial Selection Network
+======================================================
+Implements Top-K via an oblivious K-pass Bubble-Select network.
+Compared to the insertion queue (which does online extraction),
+Bubble-Select performs K parallelizable passes over the data array.
+
+Complexity: O(N * K) compare-and-swap operations.
+"""
+import math
+import bs_core
+import module1_backend
+
+# =============== Parameters ===============
+N_F = 256
+N_E = 256
+K = 5
+SCORE_BITS = 16
+M_MAX = 3         # CPSI slot budget per A-row; edit here to sweep (must match share file)
+
+TIE_BITS, PACKED_BITS, SCORE_SHIFT, VALID_SHIFT, MAX_TIE = bs_core.get_tuple_shifts(N_F, SCORE_BITS)
+
+assert PACKED_BITS < 64, f"Packed width {PACKED_BITS} exceeds safe ring margin"
+
+# =============== Module 2: Secure Partial Selection ===============
+
+def secure_partial_select(candidates, N, K):
+    """
+    K passes of oblivious bubble sort.
+    In each pass k (0 to K-1), the max element among the remaining
+    is bubbled to the position (N - 1 - k).
+    """
+    table = Array(N, sint)
+    @for_range(N)
+    def _(i):
+        table[i] = candidates[i]
+
+    @for_range(K)
+    def _(k):
+        # We need N-1-k iterations. In MP-SPDZ, runtime bounds in @for_range
+        # are supported if they are integers, but let's use a fixed bound N-1
+        # and conditionally swap, or just use python loop.
+        # Python loop unroll is better if N is small, but N=256 is okay.
+        pass_len = N - 1 - k.reveal() if hasattr(k, 'reveal') else (N - 1 - k) # Not possible since k is compile-time loop index
+        # @for_range passes k as python int, so N-1-k is a valid int.
+        
+        @for_range(N - 1 - k)
+        def _(i):
+            c1 = table[i]
+            c2 = table[i + 1]
+            is_greater = c1 > c2
+            table[i]     = is_greater.if_else(c2, c1)
+            table[i + 1] = is_greater.if_else(c1, c2)
+
+    top_k = Array(K, sint)
+    @for_range(K)
+    def _(i):
+        # Grab from the end, largest first
+        top_k[i] = table[N - 1 - i]
+    return top_k
+
+# =============== Mock Data & Pipeline ===============
+
+# A-side private input loading moved to module1_backend.load_private_inputs().
+def main():
+    print_ln("===== Baseline: Hybrid + Partial Selection =====")
+    
+    A_scores, A_valid = module1_backend.load_private_inputs(N_F)
+
+    # --- Timer M1: MPC Ingress & Aggregation ---
+    print_ln("--- Timer M1: MPC Ingress + Aggregation ---")
+    start_timer(1)
+    # M_MAX is a top-level constant (see Parameters section above)
+    cpsi_flags, cpsi_scores, overflow_flags = module1_backend.load_external_cpsi_shares(N_F, M_MAX)
+    valid_flags, s_A_array, s_B_array = module1_backend.aggregation_layer(
+        cpsi_flags, cpsi_scores, overflow_flags, A_scores, A_valid, N_F, M_MAX
+    )
+    stop_timer(1)
+
+    # --- Timer M2: Composition & Packing ---
+    print_ln("--- Timer M2: Score Composition + Packing ---")
+    start_timer(2)
+    total_scores = bs_core.compose_scores(valid_flags, s_A_array, s_B_array, N_F)
+    candidate_table = bs_core.prepare_candidate_table(valid_flags, total_scores, N_F, VALID_SHIFT, SCORE_SHIFT, MAX_TIE)
+    stop_timer(2)
+
+    # --- Timer M3: Partial Selection ---
+    print_ln("--- Timer M3: Module 2 (Partial Selection) ---")
+    start_timer(3)
+    top_k_handles = secure_partial_select(candidate_table, N_F, K)
+    stop_timer(3)
+
+    print_ln("\n--- Top-K Results ---")
+    @for_range(K)
+    def _(i):
+        # Never reveal the tie tag (paper 6.1: "never reconstructed, excluded
+        # from rho"). Right-shift out TIE_BITS in the secret domain and reveal
+        # only the (valid || score) segment. Explicit bit-length => exact
+        # truncation, not probabilistic.
+        vs_part = top_k_handles[i].right_shift(TIE_BITS, PACKED_BITS)
+        vs_clear = vs_part.reveal()
+        valid = (vs_clear >> SCORE_BITS) & 1
+        score = vs_clear & ((1 << SCORE_BITS) - 1)
+        print_ln("TOPK_CSV,%s,%s,%s", i, valid, score)
+
+main()
