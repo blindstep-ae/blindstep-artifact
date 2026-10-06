@@ -64,9 +64,11 @@ Paper-name ↔ program mapping used throughout:
 - WAN stages only: root, for `tc netem` on the loopback interface. The driver
   injects and removes it itself, including on interruption.
 
-No GPUs, no proprietary data, and no external network access at experiment
-run time (both parties talk over loopback). Installation needs network access
-for apt packages and the MP-SPDZ / VolePSI sources unless pre-provisioned.
+No GPU, no GUI, no paid APIs or API keys, no proprietary data or commercial
+software; everything is MIT-licensed (`LICENSE`) or open source (MP-SPDZ,
+VolePSI). No external network access at experiment run time (both parties
+talk over loopback). Installation needs network access for apt packages and
+the MP-SPDZ / VolePSI sources unless pre-provisioned.
 
 ## Setup
 
@@ -215,6 +217,37 @@ python3 scripts/compare_camera_ready.py
   pre-authorize `tc` via sudoers.
 - **Interrupted stage** — re-run the same command; completed trials are
   recovered from their logs, only unfinished ones re-execute.
+
+## Known limitations, nondeterminism, and reduced-scale alternatives
+
+- **Timing is host-dependent.** Absolute wall-clock values are not a
+  reproduction target (see "What should match"); the shipped LAN timings came
+  from a lightly loaded server and may differ by a constant factor on yours.
+  Relative trends across variants / N / RTT are the target.
+- **Round counts carry a few units of jitter** from MP-SPDZ's runtime
+  batching; communication volumes and preprocessing counts are exact.
+- **Tie tags are random by design** (`sint.get_random_int` per candidate) and
+  are never revealed; Top-K order among exactly tied scores is therefore not
+  reproducible run-to-run. The shipped test inputs have distinct scores, so
+  the S2 agreement check is unaffected.
+- **Table 14 (density sweep) needs the real VolePSI frontend** (optional
+  `WITH_VOLEPSI=1` install); its expected results ship in
+  `results/camera_ready_rerun/t14_density.csv` so the claim can be checked
+  against data without the C++ build.
+- **WAN experiments need root** for `tc netem`; a reviewer without root can
+  still validate every claim except the WAN rows of C5 using the LAN stages.
+- **Reduced-scale path:** the `rtt` stage (~2 h) replaces the ~30 h full WAN
+  sweep; justification above. N=8192 can be skipped by running
+  `rerun_camera_ready.sh t4 t8 t13` (~1 h) if the 32 GB compile peak is a
+  problem; this drops only the N=8192 points of Tables 5 and 12.
+- **Not yet exercised on CloudLab/Chameleon/SPHERE**; developed and verified on
+  a private Ubuntu 22.04 server with the same requirements.
+
+## Change log
+
+- v2 (2026-10-06): documentation only — added this limitations section and the
+  GUI/API/licensing statement in Requirements. No code, script, or data changes
+  since the originally submitted version.
 
 ## Public release, access, and external components
 
