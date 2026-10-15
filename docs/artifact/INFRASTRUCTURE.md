@@ -5,10 +5,10 @@
 | Resource | Requirement | Why |
 |---|---|---|
 | Node | 1 × x86-64 Linux node (bare-metal or VM) | both MPC parties run on the same host over loopback |
-| CPU | ≥ 8 cores recommended (4 minimum) | MP-SPDZ compilation and two party processes |
-| RAM | 32 GB recommended (16 GB for the one-day path without N=8192) | MP-SPDZ compiles the N=8192 programs into large bytecode |
+| CPU | 4 vCPU (more only shortens wall-clock) | MP-SPDZ compilation and two party processes |
+| RAM | 16 GB, all stages including N=8192 | the N=8192 compile peaks at 30–63 MB RSS; disk, not RAM, holds the bytecode |
 | Disk | 20 GB free | MP-SPDZ build (~5 GB) + compiled bytecode for all N |
-| OS | Ubuntu 22.04 LTS (tested); other recent Linux should work | MP-SPDZ toolchain |
+| OS | Ubuntu 22.04 LTS and 24.04 LTS (both tested); other recent Linux should work | MP-SPDZ toolchain |
 | Root | required only for the WAN stages | `tc netem` on the loopback interface |
 | Network | none beyond localhost | no downloads at run time after install |
 | GPU | none | — |
@@ -17,7 +17,7 @@
 
 **CloudLab** (https://www.cloudlab.us/): any general-purpose bare-metal
 node type with Ubuntu 22.04 — e.g. a single `c6525-25g`, `xl170`, or `m510`
-node — provides root, ≥8 cores, and ≥32 GB RAM. Chameleon
+node — provides root and comfortably exceeds the 4 vCPU / 16 GB need. Chameleon
 (https://chameleoncloud.org/) bare-metal `compute_cascadelake` or similar
 instances are equivalent.
 

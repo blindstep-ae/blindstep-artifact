@@ -15,6 +15,7 @@
 #              not in the default set)
 #   wan6    Table 6  : 6 variants, N=256, 100ms RTT, 3 trials  (~long; hours)
 #   rtt     Table 15 : B-Queue/H-Sort at 25+50ms RTT, 3 trials (~1-2 h)
+#             (the nominal 25 ms row is 24 ms effective — see wan_on)
 #   wan2048 Table 16 : B-Queue/H-Sort, N=2048, 100ms RTT, 3 trials (LONGEST;
 #                      published totals suggest many hours — run overnight)
 #   WAN stages inject tc netem on lo themselves (sudo needed) and always
@@ -28,20 +29,32 @@
 #   bash scripts/rerun_camera_ready.sh wan6         # WAN main table (needs netem)
 #   bash scripts/rerun_camera_ready.sh --force t4   # redo a completed stage
 #
-# Output: results/camera_ready_rerun/*.csv (+ per-run .txt logs).
-# Completed stages leave a .done_<stage> stamp and are skipped on re-run,
-# so an interrupted invocation resumes where it stopped.
+# Output: results/rerun/*.csv (+ per-run .txt logs); override with RERUN_OUT=<dir>.
+# The shipped expected results in results/camera_ready_rerun/ are never written.
+# Completed stages leave a .done_<stage> stamp and are skipped on re-run, so an
+# interrupted invocation resumes where it stopped. A stage that recorded any
+# COMPILE_FAIL/RUN_FAIL row counts as failed and gets no stamp, so a plain
+# re-run retries it; the stale failure row is replaced when the retry succeeds.
 # -------------------------------------------------------------------
 set -uo pipefail
 
 MPSPDZ_DIR="${MPSPDZ_DIR:?Set MPSPDZ_DIR to your MP-SPDZ checkout, e.g. export MPSPDZ_DIR=\$HOME/MP-SPDZ}"
 export LD_LIBRARY_PATH="${MPSPDZ_DIR}:${MPSPDZ_DIR}/local/lib:${LD_LIBRARY_PATH:-}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${PROJECT_ROOT}/results/camera_ready_rerun"
+# Shipped expected results are read-only; reruns land in their own directory so a
+# rerun never overwrites or appends to the baseline it is meant to be diffed against.
+EXPECTED_DIR="${PROJECT_ROOT}/results/camera_ready_rerun"
+OUT="${RERUN_OUT:-${PROJECT_ROOT}/results/rerun}"
 SRC_DST="${MPSPDZ_DIR}/Programs/Source"
 PDATA="${MPSPDZ_DIR}/Player-Data"
 FRONTEND="${PROJECT_ROOT}/external_backend/volepsi/out/build/linux/frontend/frontend"
 mkdir -p "$OUT" "$PDATA"
+if [ -d "$EXPECTED_DIR" ] && [ "$OUT" -ef "$EXPECTED_DIR" ]; then
+    echo "refusing to write into the shipped expected-results directory:" >&2
+    echo "  $EXPECTED_DIR" >&2
+    echo "point RERUN_OUT somewhere else (default: results/rerun)" >&2
+    exit 2
+fi
 
 REV=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)
 TS() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -59,6 +72,16 @@ VARIANTS=(hybrid_queue hybrid_partial_select hybrid_batcher_sort ab_queue ab_par
 CSV_HDR="variant,N,m_max,trial,P1_s,P2_s,P3_s,total_s,global_MB,rounds,rev,timestamp"
 
 safe_cp() { [ -e "$2" ] && [ "$1" -ef "$2" ] && return 0; cp "$1" "$2"; }
+
+# Failed compiles/runs are recorded as COMPILE_FAIL/RUN_FAIL rows. They are also
+# counted here so the stage is reported as failed and left without a .done stamp
+# (a plain re-run then retries it instead of skipping).
+RUN_FAILS=0
+
+drop_row() {       # $1 = csv, $2 = anchored regex of rows to delete
+    [ -f "$1" ] || return 0
+    grep -vE "$2" "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
 
 sync_sources() {   # v2-side sources + shadow-copy sync (same logic as verify driver)
     local f d mod
@@ -110,25 +133,33 @@ run_matrix() {     # $1 = csv, $2 = N, $3 = M_MAX, $4 = trials, $5 = tag, $6... 
         say "compile ${stem} (N=$N M_MAX=$MM)"
         if ! compile_stem "$stem" "$OUT/compile_${stem}.txt"; then
             say "COMPILE FAIL ${stem} — recorded, skipping runs"
+            drop_row "$csv" "^$v,$N,$MM,COMPILE_FAIL,"
             echo "$v,$N,$MM,COMPILE_FAIL,NA,NA,NA,NA,NA,NA,$REV,$(TS)" >> "$csv"
+            RUN_FAILS=$((RUN_FAILS + 1))
             continue
         fi
+        # compile succeeded: a COMPILE_FAIL row from an earlier attempt is stale
+        drop_row "$csv" "^$v,$N,$MM,COMPILE_FAIL,"
         for t in $(seq 1 "$TRIALS"); do
             local rl="$OUT/run_${stem}_t${t}.txt"
             # trial-level resume: keep a completed log from an interrupted stage
             if [ -f "$rl" ] && grep -q 'Global data sent' "$rl" && grep -qE 'CSV|TOPK_CSV' "$rl"; then
                 say "skip ${stem} trial $t (complete log exists)"
-                grep -q ",$MM,$t," <<< "$(grep "^$v,$N," "$csv" 2>/dev/null)" \
+                drop_row "$csv" "^$v,$N,$MM,$t,RUN_FAIL,"
+                grep -qE "^$v,$N,$MM,$t," "$csv" 2>/dev/null \
                     || echo "$v,$N,$MM,$t,$(parse_run "$rl"),$REV,$(TS)" >> "$csv"
                 continue
             fi
             say "run ${stem} trial $t/$TRIALS"
             ( cd "$MPSPDZ_DIR" && ./Scripts/semi2k.sh "$stem" ) > "$rl" 2>&1 || true
+            # either way the row for this trial is rewritten from this attempt
+            drop_row "$csv" "^$v,$N,$MM,$t,"
             if grep -qE 'CSV|TOPK_CSV' "$rl"; then
                 echo "$v,$N,$MM,$t,$(parse_run "$rl"),$REV,$(TS)" >> "$csv"
             else
                 say "RUN FAIL ${stem} t$t"
                 echo "$v,$N,$MM,$t,RUN_FAIL,NA,NA,NA,NA,NA,$REV,$(TS)" >> "$csv"
+                RUN_FAILS=$((RUN_FAILS + 1))
             fi
         done
     done
@@ -166,7 +197,9 @@ stage_t8() {
         } >> "$raw"
         local it eb bt
         it=$(grep -oE '[0-9]+ integer triples' "$log" | tail -1 | grep -oE '^[0-9]+')
-        eb=$(grep -oiE '[0-9]+ edabits' "$log" | tail -1 | grep -oE '^[0-9]+')
+        # MP-SPDZ prints "513 loose edabits of length 64" — the qualifier is part
+        # of the line, so an unqualified '[0-9]+ edabits' never matches.
+        eb=$(grep -oiE '[0-9]+ (loose )?edabits' "$log" | tail -1 | grep -oE '^[0-9]+')
         bt=$(grep -oE '[0-9]+ bit triples' "$log" | tail -1 | grep -oE '^[0-9]+')
         echo "$v,${it:--},${eb:--},${bt:--},$REV" >> "$csv"
     done
@@ -214,13 +247,17 @@ stage_t14() {
 # the current sources via run_matrix, and always removes netem on exit.
 # Paper WAN profile: 100 ms RTT, 100 Mbit/s => netem delay RTT/2 per pass.
 NETEM_ON=0
-wan_on() {   # $1 = RTT ms
-    local half=$(( $1 / 2 ))
+wan_on() {   # $1 = nominal RTT ms
+    # Integer halving: an odd nominal RTT yields RTT-1 ms. The shipped Table 15
+    # "25 ms" rows were measured this way, i.e. at 24 ms effective, so the delay
+    # is kept as-is for comparability and the effective value is reported.
+    local half=$(( $1 / 2 )) eff=$(( ($1 / 2) * 2 ))
     sudo tc qdisc replace dev lo root netem delay "${half}ms" rate 100mbit \
         || { say "FATAL: could not inject netem (sudo tc failed)"; return 1; }
     tc qdisc show dev lo | grep -q netem || { say "FATAL: netem not active"; return 1; }
     NETEM_ON=1
-    say "netem ON: RTT=$1 ms (delay ${half}ms/pass), 100mbit — load: $(uptime)"
+    say "netem ON: nominal RTT=$1 ms, effective ${eff} ms (delay ${half}ms/pass), 100mbit — load: $(uptime)"
+    [ "$eff" = "$1" ] || say "note: nominal $1 ms halves to ${half} ms/pass => ${eff} ms RTT"
 }
 wan_off() {
     [ "$NETEM_ON" = 1 ] && sudo tc qdisc del dev lo root 2>/dev/null
@@ -277,8 +314,17 @@ FAILED=0
 for s in "${STAGES[@]}"; do
     if stage_done "$s"; then say "stage $s already done (use --force to redo)"; continue; fi
     say "===== stage $s ====="
-    if "stage_$s"; then mark_done "$s"; else say "stage $s FAILED"; FAILED=$((FAILED+1)); fi
+    RUN_FAILS=0
+    if ! "stage_$s"; then
+        say "stage $s FAILED"
+        FAILED=$((FAILED + 1))
+    elif [ "$RUN_FAILS" -ne 0 ]; then
+        say "stage $s FAILED — ${RUN_FAILS} failed compile/run row(s); not marking done"
+        FAILED=$((FAILED + 1))
+    else
+        mark_done "$s"
+    fi
 done
-say "done — ${FAILED} stage failure(s). Results in results/camera_ready_rerun/"
-say "Push back with: git add -f results/camera_ready_rerun && git commit -m 'results: camera-ready rerun' && git push"
+say "done — ${FAILED} stage failure(s). Results in ${OUT#"$PROJECT_ROOT"/}/"
+say "Compare with: python3 scripts/compare_camera_ready.py --baseline shipped --rerun-dir ${OUT#"$PROJECT_ROOT"/}"
 exit "$FAILED"

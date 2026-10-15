@@ -2,29 +2,40 @@
 """
 scripts/compare_camera_ready.py
 
-Compare camera-ready rerun measurements (results/camera_ready_rerun/, produced
-by rerun_camera_ready.sh on the v2 branch) against the published
-numbers (data/paper_published_numbers.json, extracted from the accepted PDF).
+Diff a rerun produced by rerun_camera_ready.sh against one of two baselines:
 
-Emits results/camera_ready_rerun/camera_ready_diff.md — one section per table,
-old vs new vs delta, with per-table caveats (trial counts, definitions).
-Tables whose rerun CSV is missing are listed as "not re-measured yet".
+  --baseline paper    (default) data/paper_published_numbers.json, extracted from
+                      the accepted PDF. Deterministic columns are expected to
+                      differ by the small constant cost of the security-alignment
+                      changes (one secure comparison, N_F multiplications, K exact
+                      truncations). Writes <rerun-dir>/camera_ready_diff.md.
 
-Deterministic columns (communication MB, rounds, static preprocessing counts)
-are expected to shift by the small constant cost of the security-alignment changes
-(one secure comparison, N_F multiplications, K exact truncations).
-Timing columns additionally carry machine noise: judge them by relative delta.
+  --baseline shipped  the shipped expected-results CSVs in
+                      results/camera_ready_rerun/, which is the exactness target
+                      stated in the README: communication (MB) and the Table 8
+                      preprocessing counts must be equal, round counts must agree
+                      within ±0.1% (floor ±8) of the shipped value, and wall-clock
+                      times are reported but never judged. Prints a PASS/MISMATCH
+                      table, writes <rerun-dir>/shipped_vs_rerun.md, and exits
+                      non-zero if any deterministic value disagrees.
 
-Usage:  python3 scripts/compare_camera_ready.py
+Tables whose rerun CSV is missing are reported as not re-measured, not as failures.
+
+Usage:  python3 scripts/compare_camera_ready.py --baseline shipped
+        python3 scripts/compare_camera_ready.py --rerun-dir results/rerun
 """
+import argparse
 import csv
 import json
 import os
+import re
 import statistics
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RERUN = os.path.join(ROOT, "results", "camera_ready_rerun")
+SHIPPED_DEFAULT = os.path.join("results", "camera_ready_rerun")
+RERUN_DEFAULT = os.path.join("results", "rerun")
+RERUN = os.path.join(ROOT, RERUN_DEFAULT)       # set from --rerun-dir in main()
 PAPER = json.load(open(os.path.join(ROOT, "data", "paper_published_numbers.json")))
 OUT_MD = os.path.join(RERUN, "camera_ready_diff.md")
 
@@ -153,10 +164,14 @@ def do_t5():
 
 
 # ---------------------------------------------------------------- Table 8 --
-def parse_t8_raw():
-    """Parse t8_preprocessing_raw.txt: handles 'inf' and 'loose edabits' forms."""
-    import re
-    p = os.path.join(RERUN, "t8_preprocessing_raw.txt")
+def parse_t8_raw(d=None):
+    """Parse t8_preprocessing_raw.txt: handles 'inf' and 'loose edabits' forms.
+
+    The raw log is authoritative for Table 8: t8_preprocessing.csv carried an
+    unqualified 'edabits' pattern that never matched MP-SPDZ's
+    'N loose edabits of length 64', so its edaBits column may read '-'.
+    """
+    p = os.path.join(d or RERUN, "t8_preprocessing_raw.txt")
     if not os.path.exists(p):
         return None
     out, cur = {}, None
@@ -320,10 +335,184 @@ def do_wan():
               [(slug, slug, VNAMES[slug]) for slug in PAPER["table16"]["rows"]])
 
 
-def main():
+# ------------------------------------------- shipped-baseline exactness check --
+# The unified-schema stage CSVs, in the order the README presents the tables.
+UNIFIED = [
+    ("Table 4 (N=256, LAN)", "t4_main_table.csv"),
+    ("Table 5/12 (N sweep, LAN)", "t5_nsweep.csv"),
+    ("Table 13 (M_max sweep)", "t13_mmax.csv"),
+    ("Table 6 (WAN, N=256)", "t6_wan.csv"),
+    ("Table 15 (RTT 25 ms)", "t15_rtt25.csv"),
+    ("Table 15 (RTT 50 ms)", "t15_rtt50.csv"),
+    ("Table 16 (WAN, N=2048)", "t16_wan2048.csv"),
+]
+
+MB_TOL = 1e-6        # communication is deterministic: equality, not tolerance
+ROUND_TOL_REL = 0.001  # MP-SPDZ runtime batching shifts the reported count ...
+ROUND_TOL_MIN = 8.0    # ... by a few units; floor keeps small P1-only rows sane
+
+
+def round_tol(shipped):
+    return max(ROUND_TOL_MIN, ROUND_TOL_REL * abs(shipped))
+
+
+def rows_from(d, fname):
+    p = os.path.join(d, fname)
+    if not os.path.exists(p):
+        return None
+    with open(p) as f:
+        return [r for r in csv.DictReader(f)]
+
+
+def unified_cells(rows):
+    """(variant, N, m_max) -> per-column medians, skipping recorded failures."""
+    grouped = {}
+    for r in rows:
+        if r.get("trial") == "COMPILE_FAIL" or r.get("P1_s") == "RUN_FAIL":
+            continue
+        grouped.setdefault((r["variant"], r["N"], r["m_max"]), []).append(r)
+    return {k: {c: med(v, c) for c in ("total_s", "global_MB", "rounds")}
+            for k, v in grouped.items()}
+
+
+def judge(shipped, rerun):
+    """-> (status, detail) for one cell's deterministic columns."""
+    bits, status = [], "PASS"
+    mb_s, mb_r = shipped["global_MB"], rerun["global_MB"]
+    if mb_s is not None and mb_r is not None:
+        if abs(mb_r - mb_s) > MB_TOL:
+            status = "MISMATCH"
+            bits.append(f"MB {mb_s:,.3f}→{mb_r:,.3f} ({mb_r - mb_s:+,.3f})")
+        else:
+            bits.append(f"MB {mb_s:,.3f} exact")
+    rd_s, rd_r = shipped["rounds"], rerun["rounds"]
+    if rd_s is not None and rd_r is not None:
+        d, tol = rd_r - rd_s, round_tol(rd_s)
+        bits.append(f"rounds {rd_s:,.0f}→{rd_r:,.0f} ({d:+,.0f}, tol ±{tol:,.0f})")
+        if abs(d) > tol:
+            status = "MISMATCH" if status == "MISMATCH" else "OUT-OF-TOL"
+    t_s, t_r = shipped["total_s"], rerun["total_s"]
+    if t_s and t_r:
+        bits.append(f"time {t_s:,.2f}→{t_r:,.2f}s ({100.0 * (t_r - t_s) / t_s:+.1f}%, not judged)")
+    return status, "; ".join(bits)
+
+
+def check_unified(label, fname, shipped_dir, rerun_dir, report):
+    s_rows = rows_from(shipped_dir, fname)
+    r_rows = rows_from(rerun_dir, fname)
+    if s_rows is None:
+        report.append((label, "—", "SKIP", "no shipped baseline for this table"))
+        return 0
+    if r_rows is None:
+        report.append((label, "—", "SKIP", "not re-measured"))
+        return 0
+    s, r = unified_cells(s_rows), unified_cells(r_rows)
+    bad = 0
+    for key in sorted(s):
+        name = "{0} N={1} M={2}".format(*key)
+        if key not in r:
+            report.append((label, name, "SKIP", "not in rerun"))
+            continue
+        status, detail = judge(s[key], r[key])
+        report.append((label, name, status, detail))
+        if status != "PASS":
+            bad += 1
+    return bad
+
+
+def check_t8(shipped_dir, rerun_dir, report):
+    label = "Table 8 (preprocessing, N=256)"
+    s, r = parse_t8_raw(shipped_dir), parse_t8_raw(rerun_dir)
+    if s is None:
+        report.append((label, "—", "SKIP", "no shipped t8_preprocessing_raw.txt"))
+        return 0
+    if r is None:
+        report.append((label, "—", "SKIP", "not re-measured"))
+        return 0
+    bad = 0
+    for v in sorted(s):
+        if v not in r:
+            report.append((label, v, "SKIP", "not in rerun"))
+            continue
+        diffs = [f"{k} {s[v][k]}→{r[v][k]}" for k in ("integer_triples", "edabits", "bit_triples")
+                 if s[v][k] != r[v][k]]
+        if diffs:
+            report.append((label, v, "MISMATCH", "; ".join(diffs)))
+            bad += 1
+        else:
+            report.append((label, v, "PASS", "all three counts equal"))
+    return bad
+
+
+def check_t14(shipped_dir, rerun_dir, report):
+    label = "Table 14 (density sweep)"
+    s_rows = rows_from(shipped_dir, "t14_density.csv")
+    r_rows = rows_from(rerun_dir, "t14_density.csv")
+    if s_rows is None:
+        report.append((label, "—", "SKIP", "no shipped baseline for this table"))
+        return 0
+    if r_rows is None:
+        report.append((label, "—", "SKIP", "not re-measured (optional stage t14)"))
+        return 0
+    r_by = {x["density_pct"]: x for x in r_rows}
+    bad = 0
+    for x in s_rows:
+        d = x["density_pct"]
+        y = r_by.get(d)
+        if y is None:
+            report.append((label, f"δ={d}%", "SKIP", "not in rerun"))
+            continue
+        cell = {"global_MB": fnum(x["global_MB"]), "rounds": fnum(x["rounds"]),
+                "total_s": fnum(x["total_s"])}
+        got = {"global_MB": fnum(y["global_MB"]), "rounds": fnum(y["rounds"]),
+               "total_s": fnum(y["total_s"])}
+        status, detail = judge(cell, got)
+        report.append((label, f"δ={d}%", status, detail))
+        if status != "PASS":
+            bad += 1
+    return bad
+
+
+def do_shipped(shipped_dir, rerun_dir):
+    report = []
+    bad = sum(check_unified(label, fname, shipped_dir, rerun_dir, report)
+              for label, fname in UNIFIED)
+    bad += check_t8(shipped_dir, rerun_dir, report)
+    bad += check_t14(shipped_dir, rerun_dir, report)
+
+    rel = lambda p: os.path.relpath(p, ROOT)
+    MD.append("# Rerun vs shipped expected results\n")
+    MD.append(f"Shipped baseline: `{rel(shipped_dir)}/` · Rerun: `{rel(rerun_dir)}/`\n")
+    MD.append("Communication (MB) and the Table 8 preprocessing counts must be equal; "
+              f"round counts must agree within ±{ROUND_TOL_REL * 100:g}% of the shipped "
+              f"value (floor ±{ROUND_TOL_MIN:g}); wall-clock times are reported but not judged.\n")
+    table(["Table", "Cell", "Status", "Detail"], report)
+    counts = {}
+    for _, _, status, _ in report:
+        counts[status] = counts.get(status, 0) + 1
+    summary = ", ".join(f"{n} {k}" for k, n in sorted(counts.items()))
+    MD.append(f"**{summary or 'nothing compared'}**\n")
+
+    os.makedirs(rerun_dir, exist_ok=True)
+    out = os.path.join(rerun_dir, "shipped_vs_rerun.md")
+    with open(out, "w") as f:
+        f.write("\n".join(MD))
+    for row in report:
+        if row[2] != "PASS":
+            print(f"{row[2]:<10} {row[0]} · {row[1]} · {row[3]}")
+    print(f"wrote {out}")
+    print(summary or "nothing compared")
+    if bad:
+        print(f"FAIL: {bad} cell(s) disagree with the shipped expected results")
+        return 1
+    print("PASS: deterministic columns match the shipped expected results")
+    return 0
+
+
+def do_paper():
     os.makedirs(RERUN, exist_ok=True)
     MD.append("# Camera-ready cost diff — v2 vs published\n")
-    MD.append(f"Rerun dir: `results/camera_ready_rerun/` · Paper baseline: `data/paper_published_numbers.json`\n")
+    MD.append(f"Rerun dir: `{os.path.relpath(RERUN, ROOT)}/` · Paper baseline: `data/paper_published_numbers.json`\n")
     MD.append("Expected v2 cost (1a+1b+1c): ~+0.5% comm / ~+0.5% rounds at N=256 "
               "(verified S5 snapshot: +2.1 MB, +155 rounds on H-Queue). "
               "A content-dependent or large delta is a red flag — investigate before updating the paper.\n")
@@ -338,6 +527,30 @@ def main():
     print(f"wrote {OUT_MD}")
     missing = [s for s in MD if s.startswith("_not re-measured")]
     print(f"{len(missing)} table(s) still waiting for rerun data" if missing else "all tables compared")
+    return 0
+
+
+def main():
+    global RERUN, OUT_MD
+    ap = argparse.ArgumentParser(
+        description="Diff a rerun against the accepted-paper numbers or the shipped CSVs.")
+    ap.add_argument("--baseline", choices=("paper", "shipped"), default="paper",
+                    help="paper: data/paper_published_numbers.json (default); "
+                         "shipped: the expected-results CSVs, the README's exactness target")
+    ap.add_argument("--rerun-dir", default=RERUN_DEFAULT,
+                    help=f"rerun output directory (default: {RERUN_DEFAULT})")
+    ap.add_argument("--shipped-dir", default=SHIPPED_DEFAULT,
+                    help=f"shipped expected results (default: {SHIPPED_DEFAULT})")
+    a = ap.parse_args()
+
+    def abspath(p):
+        return p if os.path.isabs(p) else os.path.join(ROOT, p)
+
+    RERUN = abspath(a.rerun_dir)
+    OUT_MD = os.path.join(RERUN, "camera_ready_diff.md")
+    if a.baseline == "shipped":
+        return do_shipped(abspath(a.shipped_dir), RERUN)
+    return do_paper()
 
 
 if __name__ == "__main__":

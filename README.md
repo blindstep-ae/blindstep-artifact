@@ -49,8 +49,10 @@ Paper-name ↔ program mapping used throughout:
 
 ## Requirements
 
-- x86-64 Linux; ~8 cores, 32 GB RAM (MP-SPDZ compilation at N=8192 is the
-  peak), 20 GB free disk.
+- x86-64 Linux; 4 vCPU and 16 GB RAM are enough for every stage, including the
+  N=8192 compiles (an independent evaluation ran the full LAN set on that
+  configuration; MP-SPDZ's compiler peaked at 30–63 MB RSS at N=8192). 20 GB
+  free disk.
 - [MP-SPDZ](https://github.com/data61/MP-SPDZ) at commit `58d2739ac251262c0bd6034f7fc7d0666a6b1e2c`
   (`v0.4.2-13-g58d2739a`, 13 commits after the v0.4.2 release), built with the **semi2k**
   protocol (`semi2k-party.x`). This is the exact build behind the shipped
@@ -138,15 +140,30 @@ Expected final line: `ALL CHECKS PASSED`. A reference transcript is in
 ### Recommended one-day path
 
 ```bash
-bash scripts/rerun_camera_ready.sh                 # LAN: stages t4 t5 t8 t13 (2–4 h)
-bash scripts/rerun_camera_ready.sh rtt             # scaled-down WAN (~2 h, needs sudo)
-python3 scripts/compare_camera_ready.py            # diff vs. published numbers
+bash scripts/rerun_camera_ready.sh                 # LAN: stages t4 t5 t8 t13 (≤4 h)
+bash scripts/rerun_camera_ready.sh rtt             # scaled-down WAN (≤2 h, needs sudo)
+python3 scripts/compare_camera_ready.py --baseline shipped   # must-match check
+python3 scripts/compare_camera_ready.py                      # diff vs. published numbers
 ```
 
+Reruns are written to `results/rerun/` (override with `RERUN_OUT=<dir>`); the
+shipped expected results in `results/camera_ready_rerun/` are never modified,
+so the baseline stays intact however often you re-run.
+
 All stages are resumable: re-running the same command skips completed
-trials/stages. The comparison writes
-`results/camera_ready_rerun/camera_ready_diff.md` — every cell as
-`published → reproduced` with deltas.
+trials/stages. A stage that recorded a failed compile or run is reported as
+failed and left unstamped, so re-running retries it rather than skipping it.
+
+`--baseline shipped` is the one-command form of the exactness claim below: it
+prints PASS/MISMATCH per cell, writes `results/rerun/shipped_vs_rerun.md`, and
+exits non-zero if any deterministic value disagrees. Without the flag the
+comparison is against the accepted paper's numbers and writes
+`results/rerun/camera_ready_diff.md` — every cell as `published → reproduced`
+with deltas (these differ from the shipped CSVs by the <1% v2 cost).
+
+Wall-clock figures in this section are upper bounds measured on the reference
+server; an independent evaluation on 4 vCPU / 16 GB finished the LAN set and
+the `rtt` stage several times faster. Treat them as a budget, not an estimate.
 
 **Why the scaled-down WAN experiment suffices.** The paper's WAN claim (C5)
 is that under high RTT runtime is dominated by round count, so the
@@ -172,13 +189,19 @@ python3 scripts/compare_camera_ready.py
 - **Exact (hardware-independent):** communication (MB) and compile-time
   preprocessing estimates (Table 8) must equal the values in the shipped
   expected-results CSVs (`results/camera_ready_rerun/t*.csv`), and must be
-  identical across match densities (Table 14, optional stage).
+  identical across match densities (Table 14, optional stage). Check this in
+  one command with `compare_camera_ready.py --baseline shipped`. For Table 8,
+  `t8_preprocessing_raw.txt` is authoritative: the edaBits column of the
+  shipped `t8_preprocessing.csv` reads `-` because of a parser bug in the
+  driver (corrected; see the change log), and the comparison reads the raw log.
 - **Deterministic at the protocol level, with small runtime variation:**
   round counts. MP-SPDZ's VM reports rounds as executed, and its runtime
-  batching can shift the reported figure by a few rounds between runs (the
-  published tables themselves show this, e.g. 24,466 vs 24,475 P3 rounds).
-  Expect the shipped values ± a few rounds; a difference of tens or more is
-  a real discrepancy.
+  batching can shift the reported figure between runs (the published tables
+  themselves show this, e.g. 24,466 vs 24,475 P3 rounds); the absolute drift
+  grows with the round count, so the tolerance is relative: **±0.1% of the
+  shipped value, with a floor of ±8 rounds** (±36 at N=256, ±8 on the small
+  P1-only rows). `--baseline shipped` applies exactly this rule; anything
+  outside it is a real discrepancy.
 - **Environment-dependent:** wall-clock timings. The reproduction target is
   the paper's relative trends: variant ordering under LAN (Tables 4, 5, 12),
   WAN round-dominance and the fastest-variant crossover from B-Queue to
@@ -224,8 +247,18 @@ python3 scripts/compare_camera_ready.py
   reproduction target (see "What should match"); the shipped LAN timings came
   from a lightly loaded server and may differ by a constant factor on yours.
   Relative trends across variants / N / RTT are the target.
-- **Round counts carry a few units of jitter** from MP-SPDZ's runtime
-  batching; communication volumes and preprocessing counts are exact.
+- **LAN variant ordering at large N can depend on core count.** On a 4 vCPU
+  host, B-Sort has been observed to fall behind H-Queue and H-Select at
+  N=8192, while the shipped tables — measured on a many-core server — place it
+  ahead. B-Queue remains the fastest variant under LAN in both settings, which
+  is the comparison the reported LAN gaps rest on.
+- **Round counts carry jitter** from MP-SPDZ's runtime batching, growing with
+  the round count (tolerance ±0.1%, floor ±8; see "What should match");
+  communication volumes and preprocessing counts are exact.
+- **The nominal 25 ms RTT row of Table 15 is 24 ms effective.** The driver sets
+  a one-way `netem` delay of RTT/2 in integer milliseconds, so 25 ms halves to
+  12 ms per pass. The shipped data was measured this way and the driver reports
+  the effective value; the round-dominance conclusion is unaffected by the 1 ms.
 - **Tie tags are random by design** (`sint.get_random_int` per candidate) and
   are never revealed; Top-K order among exactly tied scores is therefore not
   reproducible run-to-run. The shipped test inputs have distinct scores, so
@@ -236,15 +269,31 @@ python3 scripts/compare_camera_ready.py
   against data without the C++ build.
 - **WAN experiments need root** for `tc netem`; a reviewer without root can
   still validate every claim except the WAN rows of C5 using the LAN stages.
-- **Reduced-scale path:** the `rtt` stage (~2 h) replaces the ~30 h full WAN
+- **Reduced-scale path:** the `rtt` stage (≤2 h) replaces the ≤30 h full WAN
   sweep; justification above. N=8192 can be skipped by running
-  `rerun_camera_ready.sh t4 t8 t13` (~1 h) if the 32 GB compile peak is a
-  problem; this drops only the N=8192 points of Tables 5 and 12.
+  `rerun_camera_ready.sh t4 t8 t13` (≤1 h) if the N=8192 compile and run time is
+  a problem; this drops only the N=8192 points of Tables 5 and 12.
 - **Not yet exercised on CloudLab/Chameleon/SPHERE**; developed and verified on
-  a private Ubuntu 22.04 server with the same requirements.
+  a private Ubuntu 22.04 server, and independently reproduced on a 4 vCPU /
+  16 GB cloud VM running Ubuntu 24.04 with Python 3.12 (install, the functional
+  checks, the LAN stages, and the scaled-down WAN stage).
 
 ## Change log
 
+- v2.1 (2026-10-15): corrections from artifact evaluation. `rerun_camera_ready.sh`:
+  a recorded COMPILE_FAIL/RUN_FAIL row now makes the stage fail and leaves it
+  unstamped (a plain re-run retries it, and the stale row is replaced on
+  success); reruns write to `results/rerun/` instead of the shipped
+  expected-results directory, which the driver now refuses to write into; the
+  Table 8 edaBits pattern matches MP-SPDZ's `N loose edabits of length 64`
+  (the column previously read `-`); `wan_on` reports the effective RTT.
+  `compare_camera_ready.py`: new `--baseline shipped` / `--rerun-dir` /
+  `--shipped-dir`, making the README's exactness claim a single command with a
+  non-zero exit on disagreement. README: corrected hardware requirements
+  (4 vCPU / 16 GB verified), timings relabelled as upper bounds, relative round
+  tolerance, and the 24 ms effective RTT disclosed; testing status now records
+  independent reproduction on a 4 vCPU / 16 GB Ubuntu 24.04 cloud VM. No change
+  to the MPC programs, the protocol, or the shipped measurement data.
 - v2 (2026-10-06): documentation only — added this limitations section and the
   GUI/API/licensing statement in Requirements. No code, script, or data changes
   since the originally submitted version.
@@ -261,9 +310,10 @@ python3 scripts/compare_camera_ready.py
   VolePSI at upstream commit `ec76012`
   (https://github.com/Visa-Research/volepsi) plus the patch in `patches/`.
   No datasets: all inputs are generated (simulator or frontend).
-- **Testing status:** developed and verified on a private Ubuntu 22.04 server;
-  CloudLab / Chameleon bare-metal Ubuntu 22.04 nodes meet the requirements
-  (`docs/artifact/INFRASTRUCTURE.md`).
+- **Testing status:** developed and verified on a private Ubuntu 22.04 server,
+  and independently reproduced on a 4 vCPU / 16 GB cloud VM (Ubuntu 24.04,
+  Python 3.12); CloudLab / Chameleon bare-metal Ubuntu 22.04 nodes meet the
+  requirements (`docs/artifact/INFRASTRUCTURE.md`).
 - **No tracking:** the artifact contains no analytics, telemetry, or network
   calls beyond the installer's package/source downloads.
 

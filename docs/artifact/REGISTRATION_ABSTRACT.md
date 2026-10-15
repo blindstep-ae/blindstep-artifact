@@ -42,7 +42,7 @@ security-behavior checks and the LAN, WAN, and parameter-sweep cost tables of
 Section 6 and the appendices. We request the Available, Functional, and
 Reproduced badges.
 
-Requirements and effort: an x86-64 Linux host with about 8 cores, 32 GB RAM,
+Requirements and effort: an x86-64 Linux host with 4 or more vCPU, 16 GB RAM,
 and 20 GB disk; MP-SPDZ (semi2k protocol) and Python 3.8+; optionally a CMake
 toolchain to build the bundled VolePSI frontend (a byte-aligned simulator
 covers all other experiments). WAN experiments emulate latency via tc netem
@@ -74,9 +74,9 @@ full.
 
 ## Hardware / software requirements
 
-- x86-64 Linux server; ≥8 cores and ≥32 GB RAM recommended (MP-SPDZ
-  compilation at N=8192 is the memory peak); ~20 GB free disk (compiled
-  bytecode for large N).
+- x86-64 Linux server; 4 vCPU and 16 GB RAM suffice for every stage including
+  N=8192 (verified by an independent evaluation run; MP-SPDZ's compiler peaked
+  at 30–63 MB RSS at N=8192); ~20 GB free disk (compiled bytecode for large N).
 - MP-SPDZ at commit `58d2739a` (`v0.4.2-13-g58d2739a`) with the semi2k protocol built
   (`semi2k-party.x`); the artifact addresses it via the `MPSPDZ_DIR`
   environment variable and `scripts/install.sh` checks out this commit.
