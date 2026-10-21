@@ -122,8 +122,7 @@ upstream commit `ec76012`), the frozen protocol notes and share-file
 contract, and the verification evidence (measurement CSVs and analysis; a
 SHA-256 manifest covers every file). Development history — paper drafts,
 plotting one-offs, raw server logs — is deliberately excluded.
-It will be archived with a DOI
-<!-- TODO: mint Zenodo/figshare DOI before the Available badge deadline -->.
+It is archived on Zenodo at https://doi.org/10.5281/zenodo.23542720.
 Public-release intent: the exact package evaluated by the AEC will be released
 in full to a permanent repository before camera-ready (no reduced public
 variant).

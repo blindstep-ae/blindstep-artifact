@@ -4,17 +4,16 @@ scripts/compare_camera_ready.py
 
 Diff a rerun produced by rerun_camera_ready.sh against one of two baselines:
 
-  --baseline paper    (default) data/paper_published_numbers.json, extracted from
-                      the accepted PDF. Deterministic columns are expected to
-                      differ by the small constant cost of the security-alignment
-                      changes (one secure comparison, N_F multiplications, K exact
-                      truncations). Writes <rerun-dir>/camera_ready_diff.md.
+  --baseline paper    (default) data/paper_published_numbers.json, the values
+                      printed in the paper. Deterministic columns are expected
+                      to match exactly (rounds within ±50); timings are judged
+                      by relative trend. Writes <rerun-dir>/camera_ready_diff.md.
 
   --baseline shipped  the shipped expected-results CSVs in
                       results/camera_ready_rerun/, which is the exactness target
                       stated in the README: communication (MB) and the Table 8
                       preprocessing counts must be equal, round counts must agree
-                      within ±0.1% (floor ±8) of the shipped value, and wall-clock
+                      within ±50 of the shipped value, and wall-clock
                       times are reported but never judged. Prints a PASS/MISMATCH
                       table, writes <rerun-dir>/shipped_vs_rerun.md, and exits
                       non-zero if any deterministic value disagrees.
@@ -194,7 +193,7 @@ def parse_t8_raw(d=None):
 def do_t8():
     raw = parse_t8_raw()
     section("Table 8 — compile-time preprocessing estimates (N=256)",
-            "Deterministic: any change is exactly the added cost of changes 1a/1b/1c. 'inf' rows: MP-SPDZ static analyzer reports unbounded for Select variants.")
+            "Deterministic: must match exactly. 'inf' rows: MP-SPDZ static analyzer reports unbounded.")
     if raw is None:
         MD.append("_not re-measured yet (t8_preprocessing_raw.txt missing)_\n")
         return
@@ -256,7 +255,7 @@ def do_t13():
 def do_t14():
     rows = read_rows("t14_density.csv")
     section("Table 14 — Module 1 density sweep (N=256, single runs)",
-            "MUST-RERUN table: change 2a changed blindstep_module1's input consumption. Paper P1 ≈ rerun (P1a ingress + P1b aggregation). Comm/rounds shift by changes 1a/1b.")
+            "Paper values are the shipped measurement. P1 = P1a ingress + P1b aggregation; comm/rounds must match exactly and be identical across densities.")
     if rows is None:
         MD.append("_not re-measured yet (t14_density.csv missing)_\n")
         return
@@ -319,8 +318,8 @@ def wan_table(title, caveat, csv_name, paper_key, N, row_iter):
 
 def do_wan():
     wan_table("Table 6 — WAN main table (N=256, 100ms RTT)",
-              "Timing dominated by rounds under WAN; expect ΔTotal to track ΔRounds "
-              "(~+0.5% H / ~+0.05% B), plus environment noise. n=3 both.",
+              "Timing dominated by rounds under WAN; ΔRounds should be ~0 and ΔTotal "
+              "environment noise. n=3 both.",
               "t6_wan.csv", "table6", 256,
               [(slug, slug, VNAMES[slug]) for slug in PAPER["table6"]["rows"]])
     for rtt in (25, 50):
@@ -348,12 +347,15 @@ UNIFIED = [
 ]
 
 MB_TOL = 1e-6        # communication is deterministic: equality, not tolerance
-ROUND_TOL_REL = 0.001  # MP-SPDZ runtime batching shifts the reported count ...
-ROUND_TOL_MIN = 8.0    # ... by a few units; floor keeps small P1-only rows sane
+# Round counts are identical across trials on one host (zero spread in every
+# shipped cell); they differ only across hosts or MP-SPDZ builds, by a few
+# tens regardless of N (+5 at N=256, +18 at N=8192 observed). An absolute
+# tolerance therefore fits the data; a relative one is far too loose at large N.
+ROUND_TOL_ABS = 50.0
 
 
 def round_tol(shipped):
-    return max(ROUND_TOL_MIN, ROUND_TOL_REL * abs(shipped))
+    return ROUND_TOL_ABS
 
 
 def rows_from(d, fname):
@@ -484,8 +486,9 @@ def do_shipped(shipped_dir, rerun_dir):
     MD.append("# Rerun vs shipped expected results\n")
     MD.append(f"Shipped baseline: `{rel(shipped_dir)}/` · Rerun: `{rel(rerun_dir)}/`\n")
     MD.append("Communication (MB) and the Table 8 preprocessing counts must be equal; "
-              f"round counts must agree within ±{ROUND_TOL_REL * 100:g}% of the shipped "
-              f"value (floor ±{ROUND_TOL_MIN:g}); wall-clock times are reported but not judged.\n")
+              f"round counts must agree within ±{ROUND_TOL_ABS:g} of the shipped value "
+              "(they are identical across trials on one host and differ by a few tens across "
+              "hosts or MP-SPDZ builds); wall-clock times are reported but not judged.\n")
     table(["Table", "Cell", "Status", "Detail"], report)
     counts = {}
     for _, _, status, _ in report:
@@ -511,11 +514,12 @@ def do_shipped(shipped_dir, rerun_dir):
 
 def do_paper():
     os.makedirs(RERUN, exist_ok=True)
-    MD.append("# Camera-ready cost diff — v2 vs published\n")
+    MD.append("# Rerun vs paper\n")
     MD.append(f"Rerun dir: `{os.path.relpath(RERUN, ROOT)}/` · Paper baseline: `data/paper_published_numbers.json`\n")
-    MD.append("Expected v2 cost (1a+1b+1c): ~+0.5% comm / ~+0.5% rounds at N=256 "
-              "(verified S5 snapshot: +2.1 MB, +155 rounds on H-Queue). "
-              "A content-dependent or large delta is a red flag — investigate before updating the paper.\n")
+    MD.append("The paper's deterministic columns are the shipped values, so communication, "
+              "rounds and preprocessing counts should reproduce the paper exactly (rounds within "
+              f"±{ROUND_TOL_ABS:g}); wall-clock timings are environment-dependent and are judged by "
+              "relative trend only.\n")
     do_t4()
     do_t5()
     do_t8()

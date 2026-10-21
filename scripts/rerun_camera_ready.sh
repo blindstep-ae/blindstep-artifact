@@ -56,7 +56,11 @@ if [ -d "$EXPECTED_DIR" ] && [ "$OUT" -ef "$EXPECTED_DIR" ]; then
     exit 2
 fi
 
-REV=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)
+# A tarball distribution carries no .git; fall back to the revision that
+# package_artifact.sh records in MANIFEST.sha256 (as verify_functional.sh does).
+REV=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null) \
+    || REV=$(sed -n 's/^packaged rev: //p' "$PROJECT_ROOT/MANIFEST.sha256" 2>/dev/null)
+REV="${REV:-no-git}"
 TS() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 say() { echo "[$(TS)] $*"; }
 
